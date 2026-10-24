@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if payload %}{{ payload.start.label }} to {{ payload.finish.label }} | {% endif %}Fuel route</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: #1f2328; background: #fff;
+    }
+    .layout { display: flex; height: 100vh; }
+    #map { flex: 1 1 auto; min-height: 300px; }
+    .panel { flex: 0 0 380px; overflow-y: auto; padding: 16px; border-left: 1px solid #d0d7de; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    .summary { margin: 0 0 12px; color: #57606a; }
+    .error { padding: 12px; border: 1px solid #cf222e; background: #ffebe9; border-radius: 6px; }
+    .error code { font-size: 12px; }
+    .warning { padding: 8px 12px; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { padding: 4px 6px; border-bottom: 1px solid #eaeef2; text-align: left; vertical-align: top; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    tfoot td { font-weight: 600; border-bottom: none; }
+    .totals { display: grid; grid-template-columns: auto auto; gap: 2px 12px; margin: 0; }
+    .totals dt { color: #57606a; }
+    .totals dd { margin: 0; text-align: right; font-weight: 600; }
+    .stop-icon {
+      width: 24px; height: 24px; border-radius: 50%; background: #0969da; color: #fff;
+      border: 2px solid #fff; box-shadow: 0 0 2px rgba(0, 0, 0, .6);
+      font: 600 12px/20px system-ui, sans-serif; text-align: center;
+    }
+    @media (max-width: 799px) {
+      .layout { flex-direction: column; height: auto; }
+      #map { flex: none; height: 60vh; }
+      .panel { flex: none; border-left: none; border-top: 1px solid #d0d7de; }
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <div id="map"></div>
+  <aside class="panel">
+    {% if error %}
+      <h1>Route could not be planned</h1>
+      <div class="error">
+        <p>{{ error.message }}</p>
+        {% if error.details.suggestion %}<p>{{ error.details.suggestion }}.</p>{% endif %}
+        {% if error.details and not error.details.suggestion %}
+          <ul>
+            {% for field, messages in error.details.items %}
+              <li><strong>{{ field }}</strong>: {{ messages|join:" " }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        <code>{{ error.code }}</code>
+      </div>
+    {% else %}
+      <h1>{{ payload.start.label }} &rarr; {{ payload.finish.label }}</h1>
+      <p class="summary">
+        {{ payload.route.distance_miles|floatformat:1 }} miles,
+        {{ payload.route.duration_hours|floatformat:2 }} hours driving,
+        {{ payload.fuel.stops|length }} fuel stop{{ payload.fuel.stops|length|pluralize }}
+      </p>
+      {% for warning in payload.fuel.warnings %}
+        <p class="warning">{{ warning }}</p>
+      {% endfor %}
+      {% if payload.fuel.stops %}
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Station</th><th class="num">Mile</th>
+              <th class="num">$/gal</th><th class="num">Gal</th><th class="num">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for stop in payload.fuel.stops %}
+              <tr>
+                <td>{{ stop.order }}</td>
+                <td>{{ stop.station.name }}<br><small>{{ stop.station.city }}, {{ stop.station.state }}</small></td>
+                <td class="num">{{ stop.mile_marker|floatformat:1 }}</td>
+                <td class="num">{{ stop.price_per_gallon|floatformat:3 }}</td>
+                <td class="num">{{ stop.gallons_bought|floatformat:2 }}</td>
+                <td class="num">${{ stop.cost_usd|floatformat:2 }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+      <dl class="totals">
+        <dt>Total gallons</dt><dd>{{ payload.fuel.total_gallons|floatformat:2 }}</dd>
+        <dt>Total cost</dt><dd>${{ payload.fuel.total_cost_usd|floatformat:2 }}</dd>
+        <dt>Fuel at finish</dt><dd>{{ payload.fuel.fuel_at_finish_gallons|floatformat:2 }} gal</dd>
+        <dt>External calls</dt><dd>{{ payload.meta.external_calls }}</dd>
+      </dl>
+    {% endif %}
+  </aside>
+</div>
+{{ payload|json_script:"route-data" }}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+  (function () {
+    var data = JSON.parse(document.getElementById("route-data").textContent);
+    var map = L.map("map");
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    if (!data) {
+      map.setView([39.5, -98.35], 4);  // contiguous USA
+      return;
+    }
+
+    function esc(value) {
+      var div = document.createElement("div");
+      div.textContent = value == null ? "" : String(value);
+      return div.innerHTML;
+    }
+
+    var latlngs = data.route.geometry.coordinates.map(function (c) { return [c[1], c[0]]; });
+    var line = L.polyline(latlngs, { color: "#0969da", weight: 4, opacity: 0.8 }).addTo(map);
+
+    function endpoint(point, color, title) {
+      L.circleMarker([point.lat, point.lon], {
+        radius: 9, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1
+      }).addTo(map).bindPopup("<strong>" + title + "</strong><br>" + esc(point.label));
+    }
+    endpoint(data.start, "#1a7f37", "Start");
+    endpoint(data.finish, "#cf222e", "Finish");
+
+    data.fuel.stops.forEach(function (stop) {
+      if (stop.lat == null || stop.lon == null) { return; }
+      var icon = L.divIcon({
+        className: "", html: '<div class="stop-icon">' + stop.order + "</div>",
+        iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12]
+      });
+      L.marker([stop.lat, stop.lon], { icon: icon }).addTo(map).bindPopup(
+        "<strong>" + stop.order + ". " + esc(stop.station.name) + "</strong><br>" +
+        esc(stop.station.city) + ", " + esc(stop.station.state) + "<br>" +
+        "$" + stop.price_per_gallon.toFixed(3) + "/gal &middot; " +
+        stop.gallons_bought.toFixed(2) + " gal &middot; $" + stop.cost_usd.toFixed(2) + "<br>" +
+        "Mile " + stop.mile_marker.toFixed(1) + " &middot; detour " +
+        stop.detour_miles.toFixed(1) + " mi"
+      );
+    });
+
+    map.fitBounds(line.getBounds(), { padding: [24, 24] });
+  })();
+</script>
+</body>
+</html>
