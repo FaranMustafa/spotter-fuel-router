@@ -69,6 +69,10 @@ STATE_NAMES: dict[str, str] = {
     "wyoming": "WY",
 }
 STATE_CODES: frozenset[str] = frozenset(STATE_NAMES.values())
+# Canadian province/territory codes: "Toronto, ON" is rejected before any network call.
+CANADIAN_PROVINCE_CODES: frozenset[str] = frozenset(
+    ["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"]
+)
 
 # (min_lat, max_lat, min_lon, max_lon)
 USA_BOXES: tuple[tuple[float, float, float, float], ...] = (
@@ -137,7 +141,13 @@ def _state_code(text: str) -> str | None:
 
 
 def _parse_city_state(text: str) -> tuple[str, str] | None:
-    """Split "City, ST", "City ST", "City, State Name" or "City State Name"."""
+    """Split "City, ST", "City ST", "City, State Name" or "City State Name".
+
+    Raises ``GeocodingError("outside_usa")`` if the text ends with a Canadian province code.
+    """
+    last = text.replace(",", " ").split()[-1:]
+    if last and len(text.split()) > 1 and last[0].upper() in CANADIAN_PROVINCE_CODES:
+        raise GeocodingError("outside_usa", f"'{text}' is in Canada, not the USA.")
     if "," in text:
         city, _, state_part = text.rpartition(",")
         code = _state_code(state_part)
@@ -186,7 +196,6 @@ def _nominatim_lookup(query: str) -> Location:
         "q": query,
         "format": "jsonv2",
         "limit": "1",
-        "countrycodes": "us",
         "addressdetails": "1",
     }
     record_external_call()
@@ -215,7 +224,11 @@ def _nominatim_lookup(query: str) -> Location:
     result = results[0]
     country = str((result.get("address") or {}).get("country_code", "")).lower()
     if country != "us":
-        raise GeocodingError("outside_usa", f"'{query}' does not resolve to a US location.")
+        # No countrycodes filter on the request: a foreign best match must be rejected, not
+        # silently replaced by the closest-sounding US place.
+        address = result.get("address") or {}
+        where = str(address.get("country") or country.upper() or "a location outside the USA")
+        raise GeocodingError("outside_usa", f"'{query}' resolves to {where}, not the USA.")
     try:
         lat, lon = float(result["lat"]), float(result["lon"])
     except (KeyError, TypeError, ValueError) as exc:

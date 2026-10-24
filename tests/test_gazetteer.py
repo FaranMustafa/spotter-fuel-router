@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from decimal import Decimal
 from pathlib import Path
@@ -121,6 +122,69 @@ def test_geonames_index_from_zip(tmp_path: Path) -> None:
     index = GeoNamesIndex.from_zip(path)
     assert index.lookup("Big Cabin", "OK") == pytest.approx((36.54, -95.22))
     assert len(index) == 3
+
+
+def _write_zip(path: Path, rows: list[list[str]]) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("US.txt", "\n".join("\t".join(row) for row in rows) + "\n")
+    return path
+
+
+def test_geonames_index_json_round_trip(tmp_path: Path, sample_index: GeoNamesIndex) -> None:
+    path = tmp_path / "us_places.json"
+    sample_index.write_json(path)
+    data = json.loads(path.read_text())
+    assert data["places"][0] == ["big cabin", "OK", 36.54, -95.22]  # sorted, normalised
+    assert ["Texas", "TX"] in data["states"]
+    assert "\n " not in path.read_text()  # compact, no indentation
+    loaded = GeoNamesIndex.from_json(path)
+    assert loaded.lookup("Ft. Worth", "tx") == pytest.approx((32.75, -97.35))
+    assert loaded.state_name_to_code == sample_index.state_name_to_code
+
+
+def test_load_geonames_index_from_fixture(tmp_path: Path) -> None:
+    fixture = tmp_path / "us_places.json"
+    fixture.write_text(
+        json.dumps({"places": [["tomah", "WI", 43.98, -90.5]], "states": [["Wisconsin", "WI"]]})
+    )
+    index = gazetteer.load_geonames_index(tmp_path / "missing.zip", fixture)
+    assert index.lookup("Tomah", "WI") == pytest.approx((43.98, -90.5))
+    assert index.state_name_to_code == {"Wisconsin": "WI"}
+
+
+def test_load_geonames_index_prefers_zip_over_fixture(tmp_path: Path) -> None:
+    zip_path = _write_zip(tmp_path / "US.zip", SAMPLE_ROWS)
+    fixture = tmp_path / "us_places.json"
+    fixture.write_text(json.dumps({"places": [["tomah", "WI", 43.98, -90.5]], "states": []}))
+    index = gazetteer.load_geonames_index(zip_path, fixture)
+    assert index.lookup("Big Cabin", "OK") is not None
+    assert index.lookup("Tomah", "WI") is None
+
+
+def test_load_geonames_index_empty_without_data(tmp_path: Path) -> None:
+    index = gazetteer.load_geonames_index(tmp_path / "missing.zip", tmp_path / "missing.json")
+    assert len(index) == 0
+    assert index.lookup("Tomah", "WI") is None
+
+
+@pytest.mark.django_db
+def test_lookup_place_uses_fixture_when_zip_absent(tmp_path: Path, settings) -> None:
+    settings.BASE_DIR = tmp_path
+    fixture = tmp_path / "fuel" / "data" / "us_places.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(json.dumps({"places": [["tomah", "WI", 43.98, -90.5]], "states": []}))
+    gazetteer.set_geonames_index(None)
+    place = gazetteer.lookup_place("Tomah", "WI")
+    assert place is not None
+    assert (place.lat, place.lon) == pytest.approx((43.98, -90.5))
+
+
+def test_committed_fixture_resolves_places() -> None:
+    index = GeoNamesIndex.from_json(Path(gazetteer.__file__).parents[1] / "data" / "us_places.json")
+    assert len(index) > 25_000
+    assert index.lookup("New York", "NY") is not None
+    assert index.lookup("Los Angeles", "CA") is not None
+    assert index.state_name_to_code["Texas"] == "TX"
 
 
 def test_geonames_index_from_text() -> None:

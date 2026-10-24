@@ -171,8 +171,9 @@ def test_nominatim_fallback_on_gazetteer_miss():
     assert loc == Location(35.4676, -97.5164, "Oklahoma City, OK", "nominatim")
     request = responses.calls[0].request
     assert request.headers["User-Agent"] == "spotter-test/1.0"
-    for part in ("format=jsonv2", "limit=1", "countrycodes=us", "addressdetails=1"):
+    for part in ("format=jsonv2", "limit=1", "addressdetails=1"):
         assert part in request.url
+    assert "countrycodes" not in request.url
     assert "q=Oklahoma+City%2C+OK" in request.url
     assert get_external_calls() == 1
 
@@ -210,6 +211,40 @@ def test_nominatim_not_found():
     with pytest.raises(GeocodingError) as excinfo:
         resolve_location("Nowhereville, KS")
     assert excinfo.value.code == "not_found"
+    assert "countrycodes" not in responses.calls[0].request.url
+
+
+@pytest.mark.parametrize("text", ["Toronto, ON", "Toronto ON", "Montreal, qc", "Calgary, AB"])
+@responses.activate
+def test_canadian_province_rejected_without_network(text, _setup):
+    with pytest.raises(GeocodingError) as excinfo:
+        resolve_location(text)
+    assert excinfo.value.code == "outside_usa"
+    assert "Canada" in excinfo.value.message
+    assert len(responses.calls) == 0
+    assert get_external_calls() == 0
+    assert _setup == []  # gazetteer not consulted either
+
+
+@responses.activate
+def test_nominatim_canadian_best_match_rejected():
+    responses.get(
+        NOMINATIM_URL,
+        json=[
+            _nominatim_result(
+                lat="43.65",
+                lon="-79.38",
+                display_name="Toronto, Ontario, Canada",
+                address={"city": "Toronto", "country": "Canada", "country_code": "ca"},
+            )
+        ],
+    )
+
+    with pytest.raises(GeocodingError) as excinfo:
+        resolve_location("Toronto")
+    assert excinfo.value.code == "outside_usa"
+    assert excinfo.value.message == "'Toronto' resolves to Canada, not the USA."
+    assert "countrycodes" not in responses.calls[0].request.url
 
 
 @responses.activate

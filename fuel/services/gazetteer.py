@@ -2,10 +2,11 @@
 
 Two in-process caches live here, each built lazily and kept for the life of the process:
 
-- the GeoNames US postal-code index (``(normalized city, state code) -> centroid``), read
-  from ``.cache/geonames/US.zip``. Only the management commands download that file; at
-  runtime a missing file simply means the index is empty and lookups fall through to the
-  ``Place`` table alone.
+- the GeoNames US postal-code index (``(normalized city, state code) -> centroid``). It is
+  built from ``.cache/geonames/US.zip`` when that file exists, otherwise loaded from the
+  committed export ``fuel/data/us_places.json`` (so a fresh clone works offline), otherwise
+  empty. Only the management commands download the zip; ``build_gazetteer`` rewrites the
+  export.
 - the ``StationIndex``: numpy arrays of every station that has coordinates, consumed by
   the corridor computation. ``reload_station_index()`` drops it after an import.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import re
 import zipfile
@@ -35,6 +37,11 @@ GEONAMES_MEMBER = "US.txt"
 def geonames_zip_path() -> Path:
     """Where the GeoNames US postal file is cached (gitignored)."""
     return Path(settings.BASE_DIR) / ".cache" / "geonames" / "US.zip"
+
+
+def places_fixture_path() -> Path:
+    """Where the committed, already-normalised export of the GeoNames index lives."""
+    return Path(settings.BASE_DIR) / "fuel" / "data" / "us_places.json"
 
 
 # --------------------------------------------------------------------------- normalization
@@ -140,6 +147,30 @@ class GeoNamesIndex:
         with zipfile.ZipFile(path) as archive, archive.open(GEONAMES_MEMBER) as raw:
             return cls.from_text(io.TextIOWrapper(raw, encoding="utf-8", newline=""))
 
+    @classmethod
+    def from_json(cls, path: Path) -> GeoNamesIndex:
+        """Load an index written by ``write_json`` (keys are already normalised)."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        coordinates = {
+            (str(city), str(state)): (float(lat), float(lon))
+            for city, state, lat, lon in data.get("places", [])
+        }
+        states = {str(name): str(code) for name, code in data.get("states", [])}
+        return cls(coordinates, states)
+
+    def write_json(self, path: Path) -> int:
+        """Export as compact JSON ``{"places": [[city_key, state, lat, lon], ...],
+        "states": [[state_name, code], ...]}`` (sorted, 4 dp). Returns bytes written."""
+        places = sorted(
+            [city, state, round(lat, 4), round(lon, 4)]
+            for (city, state), (lat, lon) in self.coordinates.items()
+        )
+        states = sorted([name, code] for name, code in self.state_name_to_code.items())
+        text = json.dumps({"places": places, "states": states}, separators=(",", ":"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+        return len(text) + 1
+
     def lookup(self, city: str, state: str) -> tuple[float, float] | None:
         """Return the centroid for a city in a state code, or ``None``."""
         key = (normalize_city(city), state.strip().upper())
@@ -176,20 +207,28 @@ def download_geonames(path: Path | None = None, *, force: bool = False) -> Path:
 _geonames_index: GeoNamesIndex | None = None
 
 
-def get_geonames_index() -> GeoNamesIndex:
-    """Return the process-wide GeoNames index, building it from the cached zip on first use.
+def load_geonames_index(
+    zip_path: Path | None = None, fixture_path: Path | None = None
+) -> GeoNamesIndex:
+    """Build the index from the GeoNames zip if present, else the committed JSON export,
+    else return an empty index. Never downloads."""
+    zip_path = zip_path or geonames_zip_path()
+    fixture_path = fixture_path or places_fixture_path()
+    if zip_path.exists():
+        return GeoNamesIndex.from_zip(zip_path)
+    if fixture_path.exists():
+        return GeoNamesIndex.from_json(fixture_path)
+    logger.warning("No GeoNames data (%s or %s); place index is empty", zip_path, fixture_path)
+    return GeoNamesIndex({}, {})
 
-    Never downloads: if the zip is missing the index is empty (lookups then rely on the
-    ``Place`` table, which covers every city in the price list).
-    """
+
+def get_geonames_index() -> GeoNamesIndex:
+    """Return the process-wide GeoNames index, loading it on first use (see
+    ``load_geonames_index``). An empty index means lookups rely on the ``Place`` table,
+    which covers every city in the price list."""
     global _geonames_index
     if _geonames_index is None:
-        path = geonames_zip_path()
-        if path.exists():
-            _geonames_index = GeoNamesIndex.from_zip(path)
-        else:
-            logger.warning("GeoNames file %s missing; run build_gazetteer", path)
-            _geonames_index = GeoNamesIndex({}, {})
+        _geonames_index = load_geonames_index()
     return _geonames_index
 
 

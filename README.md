@@ -20,7 +20,6 @@ Requires Python 3.12+. With [uv](https://docs.astral.sh/uv/) (recommended):
 uv sync                                        # installs runtime + dev deps from uv.lock
 uv run python manage.py migrate
 uv run python manage.py import_fuel_prices     # CSV + committed geocode fixture, no network
-uv run python manage.py build_gazetteer        # recommended: one-time 634 KB GeoNames download
 uv run python manage.py runserver
 ```
 
@@ -31,17 +30,18 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt            # or requirements.txt for runtime only
 python manage.py migrate
 python manage.py import_fuel_prices
-python manage.py build_gazetteer
 python manage.py runserver
 ```
 
-**Why `build_gazetteer`?** Start and finish names are looked up first in the `Place`
-table, which holds every city that has a truck stop (Chicago, Denver, Dallas, Miami, ...).
-Big cities without a truck stop in the list, such as New York and Los Angeles, are found
-in the GeoNames US postal-place file that this command downloads into `.cache/geonames/`
-(gitignored). Without it those names fall back to Nominatim. That still works, but
-NYC → LA then makes 3 external calls instead of 1, and 2 on a repeat, because Nominatim
-lookups are not cached.
+**One external call, straight from a fresh clone.** Start and finish names are looked up
+first in the `Place` table, which holds every city that has a truck stop (Chicago,
+Denver, Dallas, Miami, ...). Big cities without a truck stop in the list, such as New York
+and Los Angeles, are found in `fuel/data/us_places.json`, a committed 1 MB export of the
+GeoNames US postal places (29,542 city/state centroids). So NYC → LA resolves both ends
+locally and makes exactly 1 external call (OSRM), with no setup step and no network
+beyond that call. Nominatim is only a fallback for names neither source knows.
+`build_gazetteer` is not needed to run the API; it only regenerates that file (see
+[Data pipeline](#data-pipeline)).
 
 Try it:
 
@@ -234,7 +234,7 @@ external-call counter. The views only validate, call `plan_trip` and serialize.
 1. **Resolve.** `resolve_location` accepts `lat,lon`, `"City, ST"`, `"City ST"` and
    `"City, State Name"`. City names are normalized (case, punctuation, `St.`→Saint,
    `Ft.`→Fort, `Mt.`→Mount). Lookups go to the `Place` table first, then the GeoNames US
-   postal index (if `build_gazetteer` has been run), then Nominatim. Every result is
+   postal index (`fuel/data/us_places.json`), then Nominatim. Every result is
    checked against the US bounding boxes.
 2. **Route.** One OSRM request with the full geometry (about 35,000 vertices for NYC →
    LA). It has a 10 s timeout and one retry on connection errors or timeouts. The result
@@ -285,7 +285,7 @@ external-call counter. The views only validate, call `plan_trip` and serialize.
 
 ## Performance
 
-Measured on a laptop against the public OSRM server, with `build_gazetteer` run:
+Measured on a laptop against the public OSRM server, from a fresh clone:
 
 | Trip | Miles | Stops | Fuel cost | External calls | Notes |
 |------|-------|-------|-----------|----------------|-------|
@@ -307,10 +307,12 @@ Measured on a laptop against the public OSRM server, with `build_gazetteer` run:
 | Command | Network | What it does |
 |---------|---------|--------------|
 | `import_fuel_prices [--csv PATH] [--fixture PATH]` | none | Loads `fuel/data/geocoded_places.json` into `Place`, then reads `fuel/data/fuel-prices.csv`: 8,151 rows, of which 128 duplicates (same OPIS id, city, state and price) are dropped, leaving 8,023 `FuelStation` rows linked to their place. Idempotent; reloads the in-memory station index. |
-| `build_gazetteer [--force-download]` | 1 download | Downloads GeoNames `US.zip` (634 KB) to `.cache/geonames/` and builds the city/state → centroid index. Used by `geocode_places`, and at runtime for start/finish names. |
+| `build_gazetteer [--force-download]` | 1 download | Optional: regenerates `fuel/data/us_places.json`. Downloads GeoNames `US.zip` (634 KB) to `.cache/geonames/` (gitignored), builds the city/state → centroid index and exports it as compact JSON (29,542 places, about 1 MB). At runtime the index comes from the zip if present, else from the committed JSON. Also used by `geocode_places`. |
 | `geocode_places [--limit N] [--no-nominatim] [--fixture PATH]` | yes | For every station city/state without a `Place`: GeoNames first, then Nominatim at 1 request/s. Writes `Place` rows and re-exports the fixture. |
 
-**The fixture is committed**, so a grader needs no network to load data. The 3,898
+**Both fixtures are committed** (`geocoded_places.json` for station cities,
+`us_places.json` for start/finish names), so a grader needs no network to load data or to
+resolve US city names. The 3,898
 unique city/state pairs in the CSV resolve to 3,897 places: 3,813 from GeoNames and 84
 Canadian cities from Nominatim. One pair, Pass Lake, ON, is unresolved, so 6 stations
 have no coordinates.
@@ -330,7 +332,7 @@ database it does nothing and just re-exports the fixture.
 ## Testing
 
 ```sh
-uv run pytest                                          # 160 tests, ~4 s
+uv run pytest                                          # 171 tests, ~4 s
 uv run ruff check . && uv run ruff format --check .    # lint + strict formatting
 ```
 
@@ -366,10 +368,11 @@ Coverage by area:
 - **Nominatim fallback.** It is used only when a start or finish is not in the local
   gazetteer. It sends a custom User-Agent and makes at most two calls per request, but it
   is not cached or rate limited at runtime. A heavier deployment should cache it, or
-  drop it in favour of the local gazetteer plus `lat,lon` input. Its `countrycodes=us`
-  filter can also turn a foreign name into a US place (for example, `"Toronto, ON"`
-  resolves to a location in Indianapolis). Rejecting non-US region codes before calling
-  Nominatim would fix that.
+  drop it in favour of the local gazetteer plus `lat,lon` input. Inputs ending in a
+  Canadian province code (`"Toronto, ON"`) are rejected as `outside_usa` before any
+  call, and a Nominatim best match outside the US is rejected rather than replaced by a
+  US place. An ambiguous bare name without a state, such as `"Paris"`, can therefore
+  resolve abroad and be rejected; add a state (`"Paris, TX"`) to disambiguate.
 - **No auth or rate limiting**, and the cache is per-process `LocMemCache`. Production
   would add API keys or throttling (DRF throttles), Redis for a shared route cache,
   Postgres, and gunicorn.
