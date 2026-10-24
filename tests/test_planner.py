@@ -189,6 +189,110 @@ def test_same_position_duplicates_do_not_loop() -> None:
     assert [s.station_id for s in plan.stops] == [3, 4]
 
 
+# --- merging micro-stops ------------------------------------------------------------
+
+MICRO = [cand(100, 3.50, 1), cand(400, 3.40, 2), cand(420, 3.20, 3)]
+MICRO_START = 10.0  # only station 1 is reachable at the start
+
+
+def test_micro_stop_is_merged_into_previous_stop() -> None:
+    pure_config = PlannerConfig(initial_fuel_gallons=MICRO_START, min_stop_savings_usd=0)
+    pure = plan_stops(MICRO, 900, pure_config)
+    replay(pure, MICRO, pure_config)
+    # Greedy: 30 gal at 1 to reach 2, 2 gal at 2 to reach 3 (saves $0.20), 48 gal at 3.
+    assert [s.station_id for s in pure.stops] == [1, 2, 3]
+    assert [s.gallons_bought for s in pure.stops] == pytest.approx([30, 2, 48])
+    assert pure.merged_stops == 0
+    assert pure.warnings == ()
+
+    config = PlannerConfig(initial_fuel_gallons=MICRO_START)  # default: $5
+    plan = plan_stops(MICRO, 900, config)
+    replay(plan, MICRO, config)
+    assert [s.station_id for s in plan.stops] == [1, 3]
+    assert [s.order for s in plan.stops] == [1, 2]
+    a, c = plan.stops
+    assert a.gallons_bought == pytest.approx(32)
+    assert a.fuel_on_departure_gallons == pytest.approx(32)
+    assert c.fuel_on_arrival_gallons == pytest.approx(0)
+    assert c.gallons_bought == pytest.approx(48)
+    assert plan.merged_stops == 1
+    assert plan.total_gallons == pytest.approx(pure.total_gallons)
+    assert plan.total_cost_usd - pure.total_cost_usd == pytest.approx(0.20)
+    assert plan.total_cost_usd - pure.total_cost_usd <= 5.0 * plan.merged_stops
+    assert plan.fuel_at_finish_gallons == pytest.approx(0)
+    assert plan.warnings == (
+        "1 stop that saved less than $5.00 was merged into the previous stop "
+        "(set min_stop_savings_usd=0 for the pure cost optimum)",
+    )
+
+
+def test_merge_warning_counts_several_stops() -> None:
+    # Two micro-stops after station 1, both cheap to absorb, all within one tank.
+    candidates = [cand(100, 3.50, 1), cand(300, 3.45, 2), cand(320, 3.40, 3), cand(340, 3.0, 4)]
+    config = PlannerConfig(initial_fuel_gallons=MICRO_START)
+    pure = plan_stops(
+        candidates, 800, PlannerConfig(initial_fuel_gallons=MICRO_START, min_stop_savings_usd=0)
+    )
+    plan = plan_stops(candidates, 800, config)
+    replay(plan, candidates, config)
+    assert [s.station_id for s in pure.stops] == [1, 2, 3, 4]
+    assert [s.station_id for s in plan.stops] == [1, 4]
+    assert plan.merged_stops == 2
+    assert plan.total_cost_usd - pure.total_cost_usd <= 5.0 * 2
+    assert plan.warnings[0].startswith("2 stops that each saved less than $5.00 were merged")
+
+
+def test_merge_respects_tank_capacity() -> None:
+    # Station 1 buys 49 gallons to reach 2; station 2's 2-gallon top-up saves only $0.02
+    # but would overflow station 1's tank (49 + 2 > 50), so it stays. Station 3 saves
+    # $19 over buying at 2, so it stays too.
+    candidates = [cand(100, 3.50, 1), cand(590, 3.49, 2), cand(610, 3.00, 3)]
+    config = PlannerConfig(initial_fuel_gallons=MICRO_START)
+    plan = plan_stops(candidates, 1000, config)
+    replay(plan, candidates, config)
+    assert [s.station_id for s in plan.stops] == [1, 2, 3]
+    assert [s.gallons_bought for s in plan.stops] == pytest.approx([49, 2, 39])
+    assert plan.merged_stops == 0
+    assert plan.warnings == ()
+
+
+def test_merge_with_large_threshold_never_overfills() -> None:
+    candidates = [cand(100, 3.50, 1), cand(590, 3.49, 2), cand(610, 3.00, 3)]
+    config = PlannerConfig(initial_fuel_gallons=MICRO_START, min_stop_savings_usd=50)
+    plan = plan_stops(candidates, 1000, config)
+    replay(plan, candidates, config)
+    # 3 merges into 2 (2 + 39 fits); 2 can never merge into 1 (49 + 41 > 50).
+    assert [s.station_id for s in plan.stops] == [1, 2]
+    assert [s.gallons_bought for s in plan.stops] == pytest.approx([49, 41])
+    assert plan.merged_stops == 1
+
+
+def test_merge_credits_the_detour_no_longer_driven() -> None:
+    candidates = [cand(100, 3.50, 1), cand(400, 3.40, 2, detour=0.5), cand(420, 3.20, 3)]
+    pure_config = PlannerConfig(initial_fuel_gallons=MICRO_START, min_stop_savings_usd=0)
+    pure = plan_stops(candidates, 900, pure_config)
+    assert [s.gallons_bought for s in pure.stops] == pytest.approx([30.1, 2, 48])
+    config = PlannerConfig(initial_fuel_gallons=MICRO_START)
+    plan = plan_stops(candidates, 900, config)
+    replay(plan, candidates, config)
+    assert [s.station_id for s in plan.stops] == [1, 3]
+    # Station 1 needs 1.9 more gallons: station 2's 2 gallons less its 0.1-gallon detour.
+    assert plan.stops[0].gallons_bought == pytest.approx(32.0)
+    assert plan.total_gallons == pytest.approx(pure.total_gallons - 0.1)
+    assert plan.fuel_at_finish_gallons == pytest.approx(0)
+
+
+def test_first_stop_is_never_merged_into_the_start() -> None:
+    plan = plan_stops([cand(450, 3.0, 1)], 520, FULL)  # buys 2 gallons
+    assert [s.gallons_bought for s in plan.stops] == pytest.approx([2])
+    assert plan.merged_stops == 0
+
+
+def test_min_stop_savings_must_not_be_negative() -> None:
+    with pytest.raises(ValueError):
+        PlannerConfig(min_stop_savings_usd=-1)
+
+
 def test_unsorted_input_is_accepted() -> None:
     candidates = [cand(700, 5.0, 3), cand(100, 3.0, 1), cand(400, 4.0, 2)]
     plan = plan_stops(candidates, 1000, PlannerConfig(initial_fuel_gallons=10))
@@ -230,9 +334,22 @@ def random_instance(rng: random.Random, detours: bool) -> tuple[list[Candidate],
     return candidates, route_miles
 
 
+def assert_threshold_fixed_point(plan: Plan, config: PlannerConfig) -> None:
+    """The merge post-pass stops at a fixed point: no adjacent pair is still mergeable."""
+    tank = config.tank_gallons
+    for a, b in zip(plan.stops, plan.stops[1:], strict=False):
+        transfer = b.gallons_bought - 2 * b.detour_miles / config.mpg
+        fits = a.fuel_on_departure_gallons + transfer <= tank + 1e-9
+        buys = a.gallons_bought + transfer > 1e-9
+        extra = a.price_per_gallon * transfer - b.price_per_gallon * b.gallons_bought
+        assert not (fits and buys and extra < config.min_stop_savings_usd), (a, b)
+
+
+@pytest.mark.parametrize("min_savings", [0.0, 5.0, 50.0])
 @pytest.mark.parametrize("detours", [False, True])
-def test_property_greedy_beats_naive_and_stays_feasible(detours: bool) -> None:
+def test_property_greedy_beats_naive_and_stays_feasible(detours: bool, min_savings: float) -> None:
     rng = random.Random(20261025)
+    merged_total = 0
     for _ in range(200):
         candidates, route_miles = random_instance(rng, detours)
         first_need = (
@@ -241,17 +358,43 @@ def test_property_greedy_beats_naive_and_stays_feasible(detours: bool) -> None:
             else 0.0
         )
         initial = None if rng.random() < 0.5 else rng.uniform(min(first_need, 50), 50)
-        config = PlannerConfig(initial_fuel_gallons=initial)
+        config = PlannerConfig(initial_fuel_gallons=initial, min_stop_savings_usd=min_savings)
+        pure = plan_stops(
+            candidates,
+            route_miles,
+            PlannerConfig(initial_fuel_gallons=initial, min_stop_savings_usd=0),
+        )
 
         plan = plan_stops(candidates, route_miles, config)
         replay(plan, candidates, config)
         positions = [s.position_miles for s in plan.stops]
         assert positions == sorted(set(positions))
-        assert (
-            plan.total_cost_usd <= naive_fill_every_station(candidates, route_miles, config) + 1e-6
-        )
         if plan.stops:
             assert plan.fuel_at_finish_gallons == pytest.approx(0, abs=1e-6)
+
+        # Merging only removes stops; the first stop always survives.
+        kept = {s.station_id for s in plan.stops}
+        removed = [s for s in pure.stops if s.station_id not in kept]
+        assert kept <= {s.station_id for s in pure.stops}
+        assert plan.merged_stops == len(removed) == len(pure.stops) - len(plan.stops)
+        if pure.stops:
+            assert plan.stops[0].station_id == pure.stops[0].station_id
+        # Gallons are only redistributed, less the round-trip detours no longer driven.
+        saved = sum(2 * s.detour_miles / config.mpg for s in removed)
+        assert plan.total_gallons == pytest.approx(pure.total_gallons - saved, abs=1e-6)
+        assert plan.total_cost_usd <= pure.total_cost_usd + min_savings * len(removed) + 1e-6
+        if min_savings == 0:
+            assert plan == pure
+            assert (
+                plan.total_cost_usd
+                <= naive_fill_every_station(candidates, route_miles, config) + 1e-6
+            )
+        else:
+            assert_threshold_fixed_point(plan, config)
+        assert bool(plan.merged_stops) == any("merged" in w for w in plan.warnings)
+        merged_total += plan.merged_stops
+    if min_savings > 0:
+        assert merged_total > 0  # the generator must exercise merging
 
 
 # --- brute-force optimality ---------------------------------------------------------
@@ -308,7 +451,7 @@ def test_greedy_matches_brute_force_on_tiny_instances() -> None:
             cand(float(p), round(rng.uniform(2.5, 6.5), 2), k) for k, p in enumerate(positions)
         ]
         initial = None if rng.random() < 0.5 else UNIT_GALLONS * rng.randint(0, 100)
-        config = PlannerConfig(initial_fuel_gallons=initial)
+        config = PlannerConfig(initial_fuel_gallons=initial, min_stop_savings_usd=0)
 
         optimum = dp_optimal_cost(candidates, route_miles, config)
         checked += 1

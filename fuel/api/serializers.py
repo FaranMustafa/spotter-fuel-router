@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from django.conf import settings
 from rest_framework import serializers
 
+from fuel.services.geometry import DEFAULT_TOLERANCE_DEG, simplify
 from fuel.services.planner import Stop
 from fuel.services.trip import TripResult
+
+# "simplified": Douglas-Peucker at DEFAULT_TOLERANCE_DEG (~50 m); "full": every OSRM
+# vertex; "none": ``route.geometry`` is null. The planner always uses the full geometry.
+GEOMETRY_CHOICES = ("simplified", "full", "none")
 
 
 class RouteQuerySerializer(serializers.Serializer):
@@ -26,6 +32,8 @@ class RouteQuerySerializer(serializers.Serializer):
     range_miles = serializers.FloatField(
         min_value=10, max_value=2000, default=lambda: float(settings.FUEL_RANGE_MILES)
     )
+    min_stop_savings_usd = serializers.FloatField(min_value=0, max_value=1000, default=5.0)
+    geometry = serializers.ChoiceField(choices=GEOMETRY_CHOICES, default="simplified")
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         initial = attrs.get("initial_fuel_gallons")
@@ -107,9 +115,25 @@ def _stop(stop: Stop, result: TripResult) -> dict[str, Any]:
     }
 
 
-def build_route_payload(result: TripResult, map_url: str) -> dict[str, Any]:
+def _geometry(coordinates: Sequence[tuple[float, float]], mode: str) -> dict[str, Any] | None:
+    if mode == "none":
+        return None
+    if mode == "simplified":
+        coordinates = simplify(coordinates, DEFAULT_TOLERANCE_DEG)
+    elif mode != "full":
+        raise ValueError(f"unknown geometry mode {mode!r}")
+    return {
+        "type": "LineString",
+        "coordinates": [[_deg(lon), _deg(lat)] for lon, lat in coordinates],
+    }
+
+
+def build_route_payload(
+    result: TripResult, map_url: str, geometry: str = "simplified"
+) -> dict[str, Any]:
     """The 200 response body of ``/api/route/`` (SPEC § API)."""
     plan, config, route = result.plan, result.config, result.route
+    route_geometry = _geometry(route.coordinates, geometry)
     stops = [_stop(stop, result) for stop in plan.stops]
     # Totals are sums of the rounded per-stop values so the response is self-consistent
     # (sum(stops.cost_usd) == total_cost_usd exactly, not off by a cent).
@@ -121,10 +145,7 @@ def build_route_payload(result: TripResult, map_url: str) -> dict[str, Any]:
         "route": {
             "distance_miles": _miles(route.distance_miles),
             "duration_hours": _hours(route.duration_hours),
-            "geometry": {
-                "type": "LineString",
-                "coordinates": [[_deg(lon), _deg(lat)] for lon, lat in route.coordinates],
-            },
+            "geometry": route_geometry,
             "provider": route.provider,
             "map_url": map_url,
         },
@@ -136,6 +157,8 @@ def build_route_payload(result: TripResult, map_url: str) -> dict[str, Any]:
             "total_gallons": total_gallons,
             "total_cost_usd": total_cost,
             "fuel_at_finish_gallons": _gallons(plan.fuel_at_finish_gallons),
+            "min_stop_savings_usd": config.min_stop_savings_usd,
+            "merged_stops": plan.merged_stops,
             "warnings": list(plan.warnings),
             "stops": stops,
         },
@@ -143,6 +166,7 @@ def build_route_payload(result: TripResult, map_url: str) -> dict[str, Any]:
             "external_calls": result.external_calls,
             "cached_route": route.cached,
             "candidate_stations": result.candidate_count,
+            "geometry_points": len(route_geometry["coordinates"]) if route_geometry else 0,
             "routing_ms": _ms(result.routing_ms),
             "compute_ms": _ms(result.compute_ms),
         },

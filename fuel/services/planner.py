@@ -31,11 +31,26 @@ The greedy is provably optimal when every ``detour_miles`` is 0. With detours it
 feasible and consumption is exact, but choosing stations does not weigh their detour
 cost, so it is a heuristic: on random tiny instances with detours of 0-10 miles it was
 on average $0.65 above the exact optimum (worst case seen: $18).
+
+Merging micro-stops
+-------------------
+The greedy is cost-optimal but often makes tiny top-ups (2 gallons to save cents). With
+``min_stop_savings_usd > 0`` a post-pass merges such a stop B into the stop A recorded
+just before it: A buys B's gallons (less the fuel B's own round-trip detour no longer
+burns) and B is dropped. Fuel on arrival at every point after B is unchanged by such a
+merge (A's extra purchase is exactly what B's purchase and detour used to cover), so the
+only conditions are that A's departure fuel still fits the tank and A still buys > 0.
+The extra cost is ``A.price * (B.gallons - 2 * B.detour / mpg) - B.price * B.gallons``;
+a merge is applied when it is below ``min_stop_savings_usd`` (always when <= 0). Each
+round re-simulates the plan from the purchase list, applies the cheapest admissible
+merge and repeats until none is left, so the result is a fixed point in which no adjacent
+pair is mergeable, and the total cost rises by less than ``min_stop_savings_usd`` per
+removed stop. The first stop is never merged (there is no purchase at the start).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from fuel.services.corridor import Candidate
@@ -48,12 +63,16 @@ class PlannerConfig:
     mpg: float = 10.0
     range_miles: float = 500.0
     initial_fuel_gallons: float | None = None  # None means a full tank
+    # Merge stops that save less than this (USD) into the previous stop; 0 disables.
+    min_stop_savings_usd: float = 5.0
 
     def __post_init__(self) -> None:
         if self.mpg <= 0:
             raise ValueError("mpg must be positive")
         if self.range_miles <= 0:
             raise ValueError("range_miles must be positive")
+        if self.min_stop_savings_usd < 0:
+            raise ValueError("min_stop_savings_usd must not be negative")
         initial = self.initial_fuel_gallons
         if initial is not None and not (0 <= initial <= self.tank_gallons + EPSILON):
             raise ValueError(f"initial_fuel_gallons must be between 0 and {self.tank_gallons:g}")
@@ -91,6 +110,7 @@ class Plan:
     initial_fuel_gallons: float
     fuel_at_finish_gallons: float
     warnings: tuple[str, ...]
+    merged_stops: int = 0  # stops removed by the micro-stop merge post-pass
 
 
 class UnreachableError(Exception):
@@ -211,6 +231,25 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
         fuel = max(0.0, departure - need_to(pos, cands[target]))
         current = target
 
+    merged = 0
+    if config.min_stop_savings_usd > 0 and len(stops) >= 2:
+        stops, merged, merged_finish = _merge_micro_stops(stops, config, need_to, need_to_finish)
+        if merged:
+            fuel_at_finish = merged_finish
+
+    warnings: tuple[str, ...] = ()
+    if merged:
+        threshold = f"${config.min_stop_savings_usd:,.2f}"
+        what = (
+            f"1 stop that saved less than {threshold} was"
+            if merged == 1
+            else f"{merged} stops that each saved less than {threshold} were"
+        )
+        warnings = (
+            f"{what} merged into the previous stop "
+            "(set min_stop_savings_usd=0 for the pure cost optimum)",
+        )
+
     return Plan(
         stops=tuple(stops),
         total_gallons=sum(s.gallons_bought for s in stops),
@@ -218,5 +257,89 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
         route_miles=route_miles,
         initial_fuel_gallons=initial,
         fuel_at_finish_gallons=fuel_at_finish,
-        warnings=(),
+        warnings=warnings,
+        merged_stops=merged,
     )
+
+
+def _simulate(
+    purchases: Sequence[tuple[Candidate, float]],
+    config: PlannerConfig,
+    need_to: Callable[[float, Candidate], float],
+    need_to_finish: Callable[[float], float],
+) -> tuple[list[Stop], float]:
+    """Drive from the start buying ``purchases`` in order; return the stops and the fuel
+    left at the finish. Fuel needs are computed exactly as in the greedy."""
+    tank = config.tank_gallons
+    fuel = config.start_fuel_gallons
+    previous = 0.0
+    stops: list[Stop] = []
+    for order, (c, gallons) in enumerate(purchases, start=1):
+        arrival = max(0.0, fuel - need_to(previous, c))
+        departure = min(tank, arrival + gallons)
+        stops.append(
+            Stop(
+                station_id=c.station_id,
+                position_miles=c.position_miles,
+                detour_miles=c.detour_miles,
+                price_per_gallon=c.price,
+                gallons_bought=gallons,
+                cost_usd=gallons * c.price,
+                fuel_on_arrival_gallons=arrival,
+                fuel_on_departure_gallons=departure,
+                order=order,
+            )
+        )
+        fuel, previous = departure, c.position_miles
+    return stops, max(0.0, fuel - need_to_finish(previous))
+
+
+def _merge_micro_stops(
+    stops: list[Stop],
+    config: PlannerConfig,
+    need_to: Callable[[float, Candidate], float],
+    need_to_finish: Callable[[float], float],
+) -> tuple[list[Stop], int, float]:
+    """Merge stops saving less than ``config.min_stop_savings_usd`` into the previous stop.
+
+    Returns the new stops, the number of stops removed and the fuel left at the finish.
+    See "Merging micro-stops" in the module docstring for why each merge is feasible.
+    """
+    threshold = config.min_stop_savings_usd
+    tank = config.tank_gallons
+    purchases = [
+        (
+            Candidate(
+                position_miles=s.position_miles,
+                price=s.price_per_gallon,
+                station_id=s.station_id,
+                detour_miles=s.detour_miles,
+            ),
+            s.gallons_bought,
+        )
+        for s in stops
+    ]
+    current, fuel_at_finish = stops, 0.0
+    merged = 0
+    while True:
+        best: tuple[float, int, float] | None = None
+        for k in range(1, len(current)):  # k >= 1: the first stop is never merged
+            a, b = current[k - 1], current[k]
+            # B's round-trip detour is no longer driven, so A needs that much less.
+            transfer = b.gallons_bought - 2.0 * b.detour_miles / config.mpg
+            if a.fuel_on_departure_gallons + transfer > tank + EPSILON:
+                continue  # A's tank cannot hold B's purchase
+            if a.gallons_bought + transfer <= EPSILON:
+                continue  # A would no longer buy anything
+            extra = a.price_per_gallon * transfer - b.price_per_gallon * b.gallons_bought
+            if extra < threshold and (best is None or extra < best[0]):
+                best = (extra, k, transfer)
+        if best is None:
+            break
+        _, k, transfer = best
+        a_candidate, a_gallons = purchases[k - 1]
+        purchases[k - 1] = (a_candidate, a_gallons + transfer)
+        del purchases[k]
+        merged += 1
+        current, fuel_at_finish = _simulate(purchases, config, need_to, need_to_finish)
+    return current, merged, fuel_at_finish

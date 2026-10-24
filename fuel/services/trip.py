@@ -54,6 +54,7 @@ def plan_trip(
     initial_fuel_gallons: float | None = None,
     mpg: float | None = None,
     range_miles: float | None = None,
+    min_stop_savings_usd: float | None = None,
 ) -> TripResult:
     """Plan the cheapest fuel stops between two free-text (or "lat,lon") locations."""
     reset_external_calls()
@@ -64,6 +65,11 @@ def plan_trip(
         mpg=float(settings.FUEL_MPG if mpg is None else mpg),
         range_miles=float(settings.FUEL_RANGE_MILES if range_miles is None else range_miles),
         initial_fuel_gallons=initial_fuel_gallons,
+        min_stop_savings_usd=float(
+            PlannerConfig.min_stop_savings_usd
+            if min_stop_savings_usd is None
+            else min_stop_savings_usd
+        ),
     )
 
     start = resolve_location(start_text)

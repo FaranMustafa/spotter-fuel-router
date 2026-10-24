@@ -190,7 +190,14 @@ def test_plan_trip_overrides_and_cache(endpoints, happy_stations):
     mock_osrm()
 
     first = plan_trip("Startville, AZ", "Endburg, TN", initial_fuel_gallons=10)
-    second = plan_trip("35.0,-110.0", "Endburg, TN", mpg=8, range_miles=600, corridor_miles=5)
+    second = plan_trip(
+        "35.0,-110.0",
+        "Endburg, TN",
+        mpg=8,
+        range_miles=600,
+        corridor_miles=5,
+        min_stop_savings_usd=0,
+    )
 
     assert first.plan.initial_fuel_gallons == 10
     assert first.external_calls == 1
@@ -198,6 +205,8 @@ def test_plan_trip_overrides_and_cache(endpoints, happy_stations):
     assert second.external_calls == 0
     assert second.config.tank_gallons == 75
     assert second.corridor_miles == 5
+    assert first.config.min_stop_savings_usd == 5.0  # the planner default
+    assert second.config.min_stop_savings_usd == 0
     assert len(responses.calls) == 1
 
 

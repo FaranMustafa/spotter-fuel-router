@@ -15,7 +15,17 @@ from fuel.api.errors import describe_exception
 from fuel.api.serializers import RouteQuerySerializer, build_route_payload
 from fuel.services.trip import plan_trip
 
-ROUTE_FIELDS = ("start", "finish", "corridor_miles", "initial_fuel_gallons", "mpg", "range_miles")
+# Fields that change the plan, carried into ``map_url`` (``geometry`` only shapes the
+# response; the map page always draws the simplified line).
+ROUTE_FIELDS = (
+    "start",
+    "finish",
+    "corridor_miles",
+    "initial_fuel_gallons",
+    "mpg",
+    "range_miles",
+    "min_stop_savings_usd",
+)
 
 
 class HealthView(APIView):
@@ -30,8 +40,12 @@ def _map_url(request: HttpRequest, query_string: str) -> str:
     return request.build_absolute_uri(f"{url}?{query_string}" if query_string else url)
 
 
-def _run(data: Any, request: HttpRequest, query_string: str) -> dict[str, Any]:
-    """Validate, plan and serialize; raises ValidationError or the services' typed errors."""
+def _run(
+    data: Any, request: HttpRequest, query_string: str, *, geometry: str | None = None
+) -> dict[str, Any]:
+    """Validate, plan and serialize; raises ValidationError or the services' typed errors.
+
+    ``geometry`` overrides the requested geometry mode (the map page needs the line)."""
     serializer = RouteQuerySerializer(data=data)
     serializer.is_valid(raise_exception=True)
     params = serializer.validated_data
@@ -42,8 +56,10 @@ def _run(data: Any, request: HttpRequest, query_string: str) -> dict[str, Any]:
         initial_fuel_gallons=params["initial_fuel_gallons"],
         mpg=params["mpg"],
         range_miles=params["range_miles"],
+        min_stop_savings_usd=params["min_stop_savings_usd"],
     )
-    return build_route_payload(result, _map_url(request, query_string))
+    mode = geometry or params["geometry"]
+    return build_route_payload(result, _map_url(request, query_string), geometry=mode)
 
 
 class RouteView(APIView):
@@ -65,7 +81,7 @@ class RouteMapView(View):
 
     def get(self, request: HttpRequest) -> HttpResponse:
         try:
-            payload = _run(request.GET, request, request.GET.urlencode())
+            payload = _run(request.GET, request, request.GET.urlencode(), geometry="simplified")
         except Exception as exc:  # every failure is rendered on the page, like the API
             status_code, body = describe_exception(exc)
             context = {"payload": None, "error": body["error"], "query": request.GET}

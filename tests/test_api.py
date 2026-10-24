@@ -50,7 +50,8 @@ def test_route_happy_path_shape_and_rounding(client, endpoints, happy_stations):
     assert route["duration_hours"] == pytest.approx(20, abs=0.01)
     assert route["provider"] == "osrm"
     assert route["geometry"]["type"] == "LineString"
-    assert len(route["geometry"]["coordinates"]) == 50
+    # Default geometry=simplified: the 50-vertex straight test route collapses to its ends.
+    assert len(route["geometry"]["coordinates"]) == 2
     lon, lat = route["geometry"]["coordinates"][0]
     assert (lon, lat) == (-110.0, 35.0)
     assert route["map_url"].startswith("http://testserver/api/route/map/?")
@@ -61,6 +62,8 @@ def test_route_happy_path_shape_and_rounding(client, endpoints, happy_stations):
     assert fuel["range_miles"] == 500
     assert fuel["tank_gallons"] == 50
     assert fuel["initial_fuel_gallons"] == 50
+    assert fuel["min_stop_savings_usd"] == 5.0
+    assert fuel["merged_stops"] == 0
     assert fuel["warnings"] == []
     stops = fuel["stops"]
     assert len(stops) >= 2
@@ -104,6 +107,7 @@ def test_route_happy_path_shape_and_rounding(client, endpoints, happy_stations):
     assert meta["external_calls"] == 1
     assert meta["cached_route"] is False
     assert meta["candidate_stations"] == len(HAPPY_STATIONS)
+    assert meta["geometry_points"] == 2
     assert meta["routing_ms"] >= 0 and meta["compute_ms"] >= 0
 
 
@@ -152,6 +156,9 @@ def test_route_unreachable_returns_422(client, endpoints):
         ({**TRIP, "mpg": "abc"}, "mpg"),
         ({**TRIP, "initial_fuel_gallons": 60}, "initial_fuel_gallons"),
         ({**TRIP, "start": "x" * 201}, "start"),
+        ({**TRIP, "min_stop_savings_usd": -1}, "min_stop_savings_usd"),
+        ({**TRIP, "min_stop_savings_usd": 1001}, "min_stop_savings_usd"),
+        ({**TRIP, "geometry": "wiggly"}, "geometry"),
     ],
 )
 def test_route_invalid_input_returns_400(client, params, field):
@@ -227,6 +234,101 @@ def test_route_post_json(client, endpoints, happy_stations):
     assert body["fuel"]["total_gallons"] == pytest.approx(95, abs=0.01)
     assert "corridor_miles=20" in body["route"]["map_url"]
     assert "initial_fuel_gallons=25" in body["route"]["map_url"]
+
+
+@pytest.mark.django_db
+@responses.activate
+@pytest.mark.parametrize(
+    ("mode", "points"), [(None, 2), ("simplified", 2), ("full", 50), ("none", 0)]
+)
+def test_route_geometry_option(client, endpoints, happy_stations, mode, points):
+    mock_osrm()
+    params = TRIP if mode is None else {**TRIP, "geometry": mode}
+
+    body = client.get(ROUTE_URL, params).json()
+
+    geometry = body["route"]["geometry"]
+    assert "geometry" in body["route"]
+    if mode == "none":
+        assert geometry is None
+    else:
+        assert geometry["type"] == "LineString"
+        assert len(geometry["coordinates"]) == points
+        assert geometry["coordinates"][0] == [-110.0, 35.0]
+        assert geometry["coordinates"][-1][1] == 35.0
+    assert body["meta"]["geometry_points"] == points
+    # The plan is computed on the full geometry whatever is returned.
+    assert [s["mile_marker"] for s in body["fuel"]["stops"]] == [480.0, 850.0]
+
+
+# A micro-stop: with 11 gallons only mile 100 is reachable; it buys just enough to reach
+# mile 400, which buys 2 gallons to reach the cheaper mile 420 (saving $0.20).
+MICRO_STATIONS = [(100, "3.50"), (400, "3.40"), (420, "3.20"), (900, "3.60")]
+MICRO_TRIP = {**TRIP, "initial_fuel_gallons": 11}
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_route_merges_micro_stops_by_default(client, endpoints):
+    make_stations(MICRO_STATIONS)
+    mock_osrm()
+
+    merged = client.get(ROUTE_URL, MICRO_TRIP).json()["fuel"]
+    pure = client.get(ROUTE_URL, {**MICRO_TRIP, "min_stop_savings_usd": 0}).json()["fuel"]
+
+    assert [s["mile_marker"] for s in pure["stops"]] == [100.0, 400.0, 420.0, 900.0]
+    assert [s["gallons_bought"] for s in pure["stops"]] == [29.0, 2.0, 50.0, 28.0]
+    assert pure["merged_stops"] == 0
+    assert pure["min_stop_savings_usd"] == 0
+    assert pure["warnings"] == []
+
+    assert [s["mile_marker"] for s in merged["stops"]] == [100.0, 420.0, 900.0]
+    assert [s["gallons_bought"] for s in merged["stops"]] == [31.0, 50.0, 28.0]
+    assert [s["order"] for s in merged["stops"]] == [1, 2, 3]
+    assert merged["merged_stops"] == 1
+    assert merged["min_stop_savings_usd"] == 5.0
+    assert merged["total_gallons"] == pure["total_gallons"]
+    assert merged["total_cost_usd"] == pytest.approx(pure["total_cost_usd"] + 0.20, abs=0.011)
+    assert merged["warnings"] == [
+        "1 stop that saved less than $5.00 was merged into the previous stop "
+        "(set min_stop_savings_usd=0 for the pure cost optimum)"
+    ]
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_map_view_shows_merge_warning_and_simplified_line(client, endpoints):
+    make_stations(MICRO_STATIONS)
+    mock_osrm()
+
+    response = client.get(MAP_URL, {**MICRO_TRIP, "geometry": "none"})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "3 fuel stops" in html
+    assert "1 stop that saved less than $5.00 was merged into the previous stop" in html
+    payload = response.context["payload"]
+    # The map always draws the simplified line, even when the API caller asked for none.
+    assert len(payload["route"]["geometry"]["coordinates"]) == 2
+    assert payload["meta"]["geometry_points"] == 2
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_route_post_carries_min_stop_savings_into_map_url(client, endpoints, happy_stations):
+    mock_osrm()
+
+    response = client.post(
+        ROUTE_URL,
+        data=json.dumps({**TRIP, "min_stop_savings_usd": 0, "geometry": "none"}),
+        content_type="application/json",
+    )
+
+    body = response.json()
+    assert body["fuel"]["min_stop_savings_usd"] == 0
+    assert body["route"]["geometry"] is None
+    assert "min_stop_savings_usd=0" in body["route"]["map_url"]
+    assert "geometry" not in body["route"]["map_url"]
 
 
 @pytest.mark.django_db
