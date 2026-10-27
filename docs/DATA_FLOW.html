@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spotter fuel router: data flow</title>
+<style>
+  :root{--bg:#f7f7f5;--fg:#1c1c1a;--muted:#5f5f5a;--line:#d9d9d2;--card:#fff;
+        --ext:#b23a48;--extbg:#fbeaec;--data:#2b6cb0;--databg:#e8f0fb;--svc:#2f7d4f;--svcbg:#e7f4ec;
+        --api:#8a5a00;--apibg:#fdf3dd;--store:#5b4b8a;--storebg:#eee9f8}
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#15151a;--fg:#ececea;--muted:#a8a8a2;--line:#33333c;--card:#1e1e25;
+        --extbg:#3a1f24;--databg:#1d2a3d;--svcbg:#1c3226;--apibg:#3a2d10;--storebg:#2a2440}}
+  body{margin:0;padding:24px 16px 48px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
+  main{max-width:1000px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 4px} h2{font-size:19px;margin:40px 0 12px;padding-top:12px;border-top:1px solid var(--line)}
+  p.lead{color:var(--muted);margin:0 0 20px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 6px;font-size:13px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid}
+  .flow{display:flex;flex-direction:column;gap:0}
+  .step{display:grid;grid-template-columns:36px 1fr;gap:14px;align-items:start}
+  .num{width:36px;height:36px;border-radius:50%;background:var(--fg);color:var(--bg);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:0}
+  .card h3{margin:0 0 4px;font-size:16px} .card h3 code{font-size:13px;color:var(--muted);font-weight:400;margin-left:6px;overflow-wrap:anywhere}
+  .card,.card p,.card li,td{overflow-wrap:anywhere}
+  .card p{margin:4px 0} .card ul{margin:6px 0 2px;padding-left:20px} .card li{margin:2px 0}
+  .arrow{height:26px;margin-left:17px;border-left:2px solid var(--line);position:relative}
+  .arrow::after{content:"";position:absolute;left:-5px;bottom:-1px;border:5px solid transparent;border-top:7px solid var(--line)}
+  .tag{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid;margin:0 4px 4px 0;vertical-align:middle}
+  .ext{color:var(--ext);background:var(--extbg);border-color:var(--ext)} .data{color:var(--data);background:var(--databg);border-color:var(--data)}
+  .svc{color:var(--svc);background:var(--svcbg);border-color:var(--svc)} .api{color:var(--api);background:var(--apibg);border-color:var(--api)}
+  .store{color:var(--store);background:var(--storebg);border-color:var(--store)}
+  .b-ext{border-left:5px solid var(--ext)} .b-data{border-left:5px solid var(--data)} .b-svc{border-left:5px solid var(--svc)} .b-api{border-left:5px solid var(--api)} .b-store{border-left:5px solid var(--store)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;background:var(--bg);padding:1px 5px;border-radius:4px}
+  pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12.5px;line-height:1.45}
+  table{border-collapse:collapse;width:100%;font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top} th{background:var(--bg);font-weight:600} tr:last-child td{border-bottom:0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px} @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .note{color:var(--muted);font-size:13.5px}
+  svg{width:100%;height:auto;display:block;background:var(--card);border:1px solid var(--line);border-radius:10px}
+  svg text{font:12.5px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:var(--fg)} svg .small{font-size:11px;fill:var(--muted)}
+  svg .box{stroke-width:1.2;rx:8}
+  svg .l{stroke:var(--muted);stroke-width:1.4;fill:none;marker-end:url(#ah)}
+</style>
+</head>
+<body>
+<main>
+<h1>Spotter fuel router: how data flows</h1>
+<p class="lead">One request to <code>GET /api/route/?start=…&amp;finish=…</code>, every service it touches, and the two offline pipelines that make the request cheap. Numbers are from real runs (NYC → LA).</p>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--extbg);border-color:var(--ext)"></i> External service (network)</span>
+  <span><i class="dot" style="background:var(--databg);border-color:var(--data)"></i> Data file</span>
+  <span><i class="dot" style="background:var(--storebg);border-color:var(--store)"></i> Storage (SQLite / cache / RAM)</span>
+  <span><i class="dot" style="background:var(--svcbg);border-color:var(--svc)"></i> Internal service module</span>
+  <span><i class="dot" style="background:var(--apibg);border-color:var(--api)"></i> API layer</span>
+</div>
+
+<h2>1. The big picture</h2>
+<svg viewBox="0 0 980 520" role="img" aria-label="Architecture overview">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+
+  <!-- offline band -->
+  <rect x="10" y="10" width="960" height="150" fill="none" stroke="var(--line)" stroke-dasharray="5 4" rx="10"/>
+  <text x="22" y="30" class="small">OFFLINE, RUN ONCE (results committed to the repo)</text>
+
+  <rect class="box" x="24" y="48" width="170" height="52" fill="var(--extbg)" stroke="var(--ext)"/>
+  <text x="34" y="70">GeoNames US.zip</text><text x="34" y="88" class="small">download.geonames.org</text>
+
+  <rect class="box" x="24" y="108" width="170" height="40" fill="var(--extbg)" stroke="var(--ext)"/>
+  <text x="34" y="133">Nominatim (fallback)</text>
+
+  <rect class="box" x="250" y="48" width="200" height="40" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="260" y="73">build_gazetteer</text>
+
+  <rect class="box" x="250" y="108" width="200" height="40" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="260" y="133">geocode_places</text>
+
+  <rect class="box" x="510" y="48" width="200" height="40" fill="var(--databg)" stroke="var(--data)"/>
+  <text x="520" y="66">fuel/data/us_places.json</text><text x="520" y="81" class="small">29,542 US places</text>
+
+  <rect class="box" x="510" y="108" width="200" height="40" fill="var(--databg)" stroke="var(--data)"/>
+  <text x="520" y="126">fuel/data/geocoded_places.json</text><text x="520" y="141" class="small">3,897 city/state → lat,lon</text>
+
+  <rect class="box" x="770" y="48" width="190" height="40" fill="var(--databg)" stroke="var(--data)"/>
+  <text x="780" y="66">fuel/data/fuel-prices.csv</text><text x="780" y="81" class="small">8,151 rows (from Spotter)</text>
+
+  <line class="l" x1="194" y1="74" x2="248" y2="70"/>
+  <line class="l" x1="194" y1="128" x2="248" y2="128"/>
+  <line class="l" x1="450" y1="68" x2="508" y2="68"/>
+  <line class="l" x1="450" y1="128" x2="508" y2="128"/>
+
+  <!-- setup band -->
+  <rect x="10" y="175" width="960" height="95" fill="none" stroke="var(--line)" stroke-dasharray="5 4" rx="10"/>
+  <text x="22" y="195" class="small">SETUP ON A FRESH CLONE (no network): migrate + import_fuel_prices</text>
+
+  <rect class="box" x="250" y="210" width="200" height="40" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="260" y="235">import_fuel_prices</text>
+
+  <rect class="box" x="510" y="210" width="200" height="40" fill="var(--storebg)" stroke="var(--store)"/>
+  <text x="520" y="228">SQLite: Place, FuelStation</text><text x="520" y="243" class="small">3,897 places · 8,023 stations</text>
+
+  <rect class="box" x="770" y="210" width="190" height="40" fill="var(--storebg)" stroke="var(--store)"/>
+  <text x="780" y="228">StationIndex (numpy, RAM)</text><text x="780" y="243" class="small">7,403 US stations, loaded once</text>
+
+  <line class="l" x1="610" y1="148" x2="610" y2="208"/>
+  <line class="l" x1="865" y1="88" x2="865" y2="150"/><line class="l" x1="865" y1="150" x2="452" y2="222" />
+  <line class="l" x1="450" y1="230" x2="508" y2="230"/>
+  <line class="l" x1="710" y1="230" x2="768" y2="230"/>
+
+  <!-- request band -->
+  <rect x="10" y="285" width="960" height="225" fill="none" stroke="var(--line)" stroke-dasharray="5 4" rx="10"/>
+  <text x="22" y="305" class="small">PER REQUEST (~1.5 s, of which ~150 ms is compute)</text>
+
+  <rect class="box" x="24" y="320" width="130" height="44" fill="var(--apibg)" stroke="var(--api)"/>
+  <text x="34" y="338">Client</text><text x="34" y="354" class="small">Postman / browser</text>
+
+  <rect class="box" x="24" y="400" width="130" height="60" fill="var(--apibg)" stroke="var(--api)"/>
+  <text x="34" y="420">RouteView</text><text x="34" y="436" class="small">serializer validates</text><text x="34" y="451" class="small">errors.py maps codes</text>
+
+  <rect class="box" x="200" y="400" width="130" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="210" y="420">trip.plan_trip</text><text x="210" y="436" class="small">orchestrates</text><text x="210" y="451" class="small">counts ext. calls</text>
+
+  <rect class="box" x="370" y="320" width="130" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="380" y="340">geocoding</text><text x="380" y="356" class="small">resolve_location ×2</text><text x="380" y="371" class="small">0 calls (gazetteer)</text>
+
+  <rect class="box" x="370" y="400" width="130" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="380" y="420">routing</text><text x="380" y="436" class="small">get_route</text><text x="380" y="451" class="small">1 call, 24 h cache</text>
+
+  <rect class="box" x="540" y="320" width="130" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="550" y="340">corridor</text><text x="550" y="356" class="small">find_candidates</text><text x="550" y="371" class="small">numpy, ~15 ms</text>
+
+  <rect class="box" x="540" y="400" width="130" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="550" y="420">planner</text><text x="550" y="436" class="small">plan_stops + merge</text><text x="550" y="451" class="small">pure Python</text>
+
+  <rect class="box" x="710" y="320" width="120" height="60" fill="var(--extbg)" stroke="var(--ext)"/>
+  <text x="720" y="340">OSRM</text><text x="720" y="356" class="small">router.project-</text><text x="720" y="371" class="small">osrm.org</text>
+
+  <rect class="box" x="710" y="400" width="120" height="60" fill="var(--svcbg)" stroke="var(--svc)"/>
+  <text x="720" y="420">geometry</text><text x="720" y="436" class="small">Douglas-Peucker</text><text x="720" y="451" class="small">742 KB → 59 KB</text>
+
+  <rect class="box" x="860" y="320" width="100" height="60" fill="var(--extbg)" stroke="var(--ext)"/>
+  <text x="870" y="340">Nominatim</text><text x="870" y="356" class="small">only if the</text><text x="870" y="371" class="small">gazetteer misses</text>
+
+  <rect class="box" x="860" y="400" width="100" height="60" fill="var(--apibg)" stroke="var(--api)"/>
+  <text x="870" y="420">JSON</text><text x="870" y="436" class="small">+ map_url →</text><text x="870" y="451" class="small">Leaflet page</text>
+
+  <line class="l" x1="89" y1="364" x2="89" y2="398"/>
+  <line class="l" x1="154" y1="430" x2="198" y2="430"/>
+  <line class="l" x1="330" y1="420" x2="368" y2="352"/>
+  <line class="l" x1="330" y1="430" x2="368" y2="430"/>
+  <line class="l" x1="500" y1="430" x2="538" y2="352"/>
+  <line class="l" x1="500" y1="430" x2="538" y2="430"/>
+  <line class="l" x1="500" y1="420" x2="708" y2="350"/>
+  <line class="l" x1="500" y1="340" x2="858" y2="340"/>
+  <line class="l" x1="670" y1="430" x2="708" y2="430"/>
+  <line class="l" x1="830" y1="430" x2="858" y2="430"/>
+  <line class="l" x1="865" y1="250" x2="605" y2="398"/>
+</svg>
+<p class="note">Dashed bands are the three phases. Red boxes are the only places the network is touched; in the per-request band only OSRM is hit in the normal case, and Nominatim only when a place is not in the local gazetteer (for example a street address).</p>
+
+<h2>2. Offline pipeline: turning the CSV into something routable</h2>
+<p>The CSV has no coordinates, and its addresses are highway exits that free geocoders cannot resolve. So stations are placed at the centre of their city, once, offline, and the result is committed.</p>
+<div class="flow">
+  <div class="step"><div class="num">A</div><div class="card b-ext">
+    <h3>GeoNames US postal places <code>manage.py build_gazetteer</code></h3>
+    <span class="tag ext">GeoNames</span><span class="tag data">us_places.json</span>
+    <p>Downloads <code>US.zip</code> (postal-code places with lat/lon) to <code>.cache/geonames/</code>, normalises city names, keeps one centroid per (city, state), and exports <code>fuel/data/us_places.json</code>: 29,542 places plus a state-name → code table. Committed, so a fresh clone needs no download.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">B</div><div class="card b-svc">
+    <h3>Geocode the CSV's cities <code>manage.py geocode_places</code></h3>
+    <span class="tag data">fuel-prices.csv</span><span class="tag svc">gazetteer.lookup_place</span><span class="tag ext">Nominatim (fallback, 1 req/s)</span><span class="tag data">geocoded_places.json</span>
+    <p>Reads the 3,898 distinct (city, state) pairs in the CSV. Each is looked up in the GeoNames index first; misses go to Nominatim with a custom User-Agent at one request per second. Output: <code>fuel/data/geocoded_places.json</code>, 3,897 pairs with <code>source</code> = geonames or nominatim.</p>
+    <p class="note">The single miss is "Pass Lake, ON" (Flying J #866, CSV rows 4949–4954), a Canadian hamlet. 85 of the pairs are Canadian; they are kept but never used as stops.</p>
+  </div></div>
+</div>
+
+<h2>3. Setup on a fresh clone: no network</h2>
+<div class="flow">
+  <div class="step"><div class="num">C</div><div class="card b-store">
+    <h3>Load the database <code>manage.py migrate &amp;&amp; manage.py import_fuel_prices</code></h3>
+    <span class="tag data">geocoded_places.json</span><span class="tag data">fuel-prices.csv</span><span class="tag store">SQLite</span>
+    <ul>
+      <li>Creates 3,897 <code>Place</code> rows from the fixture.</li>
+      <li>Reads 8,151 CSV rows, trims whitespace, drops 128 exact duplicates on (opis_id, city, state, price), creates 8,023 <code>FuelStation</code> rows each linked to its <code>Place</code>.</li>
+      <li>Idempotent: running it again replaces the data. Prints the summary you saw (6 stations without coordinates = Pass Lake).</li>
+    </ul>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">D</div><div class="card b-store">
+    <h3>In-memory station index <code>gazetteer.get_station_index()</code></h3>
+    <span class="tag store">numpy arrays in RAM</span>
+    <p>On the first request the process loads every station that has a place <em>and</em> a US state code into four parallel numpy arrays: ids, lats, lons, prices. 7,403 stations. Loaded once per process, so the corridor search never queries SQLite.</p>
+  </div></div>
+</div>
+
+<h2>4. Per request: <code>GET /api/route/?start=New York, NY&amp;finish=Los Angeles, CA</code></h2>
+<div class="flow">
+  <div class="step"><div class="num">1</div><div class="card b-api">
+    <h3>Validate <code>fuel/api/views.py · RouteView · RouteQuerySerializer</code></h3>
+    <span class="tag api">DRF</span>
+    <p>GET query params or POST JSON body. Checks ranges: <code>corridor_miles</code> 0.5–100, <code>initial_fuel_gallons</code> 0–tank, <code>mpg</code> 1–100, <code>range_miles</code> 10–2000, <code>min_stop_savings_usd</code> 0–1000, <code>geometry</code> simplified|full|none. Bad input → 400 <code>invalid_request</code>.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">2</div><div class="card b-svc">
+    <h3>Orchestrate <code>fuel/services/trip.py · plan_trip()</code></h3>
+    <span class="tag svc">trip</span><span class="tag svc">http.external_calls counter</span>
+    <p>Resets the per-request external-call counter (a ContextVar in <code>http.py</code>; every real HTTP call increments it). Then runs steps 3–8 in order and times routing vs compute.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">3</div><div class="card b-svc">
+    <h3>Resolve start and finish <code>geocoding.resolve_location(text)</code> ×2</h3>
+    <span class="tag svc">geocoding</span><span class="tag store">Place table</span><span class="tag data">us_places.json</span><span class="tag ext">Nominatim (fallback only)</span>
+    <ol style="margin:6px 0;padding-left:20px">
+      <li><code>"40.71,-74.00"</code> → parsed directly. 0 calls.</li>
+      <li><code>"City, ST"</code>, <code>"City ST"</code>, <code>"City, State Name"</code> → <code>Place</code> table, then GeoNames index. 0 calls. Inputs ending in a Canadian province code are rejected before any call.</li>
+      <li>Anything else (street address, bare "Paris") → Nominatim, one call per location. The best match must have country_code <code>us</code>, else 400 <code>outside_usa</code> naming the country found.</li>
+    </ol>
+    <p>Every result passes <code>assert_inside_usa</code> (bounding boxes for the lower 48, Alaska, Hawaii). Output: <code>Location(lat, lon, label, source)</code>.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">4</div><div class="card b-ext">
+    <h3>Get the driving route <code>routing.get_route(start, finish)</code></h3>
+    <span class="tag ext">OSRM demo server</span><span class="tag store">Django LocMem cache, 24 h</span>
+    <p>Cache key = <code>route:v1:</code> + coordinates rounded to 4 dp. On a miss: one GET to <code>router.project-osrm.org/route/v1/driving/{lon,lat};{lon,lat}?overview=full&amp;geometries=geojson</code>, 10 s timeout, one retry on timeout/5xx. Parses distance (m → miles), duration (s → hours) and the GeoJSON LineString (about 11,000 points for NYC → LA). Failures → 502 <code>upstream</code>; OSRM "NoRoute" (e.g. Honolulu) → 422 <code>no_route</code>.</p>
+    <p>Output: <code>Route(distance_miles=2799, duration_hours, coordinates[(lon,lat)], provider="osrm", cached)</code>. This is the only network call in the normal case; the second identical request reads the cache and reports <code>external_calls: 0</code>.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">5</div><div class="card b-svc">
+    <h3>Find stations near the road <code>corridor.find_candidates(coords, StationIndex, corridor_miles)</code></h3>
+    <span class="tag svc">corridor (pure numpy)</span><span class="tag store">StationIndex</span>
+    <ul>
+      <li>Cumulative mile markers along the polyline (haversine per segment).</li>
+      <li>Resample the route every mile, so long straight highway segments still have samples.</li>
+      <li>Project all 7,403 stations with an equirectangular projection (cos of the sample latitude), compute the nearest sample for each station in chunks, then project onto the actual road segment.</li>
+      <li>Keep stations within <code>corridor_miles</code> (default 10). Output: sorted <code>Candidate(position_miles, price, station_id, detour_miles)</code>, about 300 for NYC → LA, in ~15 ms.</li>
+    </ul>
+    <p>Positions are then scaled by <code>route.distance_miles / polyline_miles</code> so mile markers match OSRM's road distance.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">6</div><div class="card b-svc">
+    <h3>Choose where to buy fuel <code>planner.plan_stops(candidates, route_miles, PlannerConfig)</code></h3>
+    <span class="tag svc">planner (pure Python)</span>
+    <p>Greedy gas-station algorithm, proven optimal on a line and tested against a brute-force DP:</p>
+    <ol style="margin:6px 0;padding-left:20px">
+      <li>Coast on the initial fuel (default full tank, 50 gal) to the cheapest reachable station. If the initial fuel cannot reach any station, raise it to the minimum needed and add a warning.</li>
+      <li>At each station: if a cheaper station is within range, buy just enough to reach it. Else if the finish is within a full tank, buy just enough to arrive empty. Else fill up and go to the cheapest station in range. Detours cost 2 × detour miles of fuel.</li>
+      <li>No station in range → 422 <code>unreachable</code> with the gap in miles.</li>
+      <li>Post-pass: merge any stop that saves less than <code>min_stop_savings_usd</code> ($5) into the previous one. NYC → LA: 17 stops → 13, cost rises a few dollars.</li>
+    </ol>
+    <p>Output: <code>Plan(stops, total_gallons, total_cost_usd=717.31, fuel_at_finish, warnings, merged_stops)</code>.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">7</div><div class="card b-store">
+    <h3>Hydrate the chosen stations <code>FuelStation.objects.select_related("place").in_bulk(ids)</code></h3>
+    <span class="tag store">SQLite</span>
+    <p>One query for the 13 chosen station ids, with name, address, city, state and coordinates. SQLite is touched only here per request.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">8</div><div class="card b-svc">
+    <h3>Shrink the geometry <code>geometry.simplify(coords, 0.0005°)</code></h3>
+    <span class="tag svc">geometry (numpy Douglas-Peucker)</span>
+    <p>Planning always uses the full OSRM line; the response gets the simplified one (default), the full one, or none. 11,000 points → about 1,100; 742 KB → 59 KB. Visually identical at map zoom.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">9</div><div class="card b-api">
+    <h3>Serialize <code>serializers.build_route_payload()</code> · errors via <code>errors.describe_exception()</code></h3>
+    <span class="tag api">DRF response</span>
+    <p>Rounds gallons to 0.01 and money to cents, builds <code>map_url</code>, and adds <code>meta</code>: <code>external_calls</code>, <code>cached_route</code>, <code>candidate_stations</code>, <code>geometry_points</code>, <code>routing_ms</code>, <code>compute_ms</code>. Any typed service error becomes <code>{"error": {code, message, details}}</code> with 400 / 422 / 502.</p>
+  </div></div>
+  <div class="arrow"></div>
+  <div class="step"><div class="num">10</div><div class="card b-api">
+    <h3>Map page <code>GET /api/route/map/?start=…&amp;finish=…</code> · <code>RouteMapView</code> · <code>templates/fuel/map.html</code></h3>
+    <span class="tag api">Django template</span><span class="tag ext">OSM tiles (browser only)</span>
+    <p>Runs the same <code>plan_trip</code> (route comes from the cache, so 0 server-side external calls), embeds the payload with <code>json_script</code>, and Leaflet 1.9.4 draws the polyline, start/finish, numbered stop markers with popups, and a summary panel. Map tiles are fetched by the <em>browser</em> from OpenStreetMap; the server never calls a tile or static-map API.</p>
+  </div></div>
+</div>
+
+<h2>5. Every service, in one table</h2>
+<table>
+  <thead><tr><th>Service</th><th>Kind</th><th>When</th><th>Calls per request</th><th>Where in code</th></tr></thead>
+  <tbody>
+    <tr><td>OSRM demo server</td><td>External routing API</td><td>Per request, cache miss</td><td>1 (0 on cache hit)</td><td><code>fuel/services/routing.py</code></td></tr>
+    <tr><td>Nominatim (OpenStreetMap)</td><td>External geocoder</td><td>Only when a location is not in the local gazetteer; offline for 85 stations' cities</td><td>0 normally, 1 per unresolved location</td><td><code>fuel/services/geocoding.py</code>, <code>geocode_places</code></td></tr>
+    <tr><td>GeoNames US postal places</td><td>External dataset</td><td>Once, offline, by <code>build_gazetteer</code>; committed as JSON</td><td>0</td><td><code>fuel/services/gazetteer.py</code>, <code>fuel/data/us_places.json</code></td></tr>
+    <tr><td>OpenStreetMap tiles</td><td>External, browser-side</td><td>Map page only</td><td>0 from the server</td><td><code>fuel/templates/fuel/map.html</code></td></tr>
+    <tr><td>SQLite</td><td>Storage</td><td>Setup; one <code>in_bulk</code> per request</td><td>1 query</td><td><code>fuel/models.py</code></td></tr>
+    <tr><td>Django LocMem cache</td><td>Storage</td><td>Route memoisation, 24 h TTL</td><td>1 get, 1 set on miss</td><td><code>routing.py</code>, <code>config/settings.py</code></td></tr>
+    <tr><td>StationIndex (numpy)</td><td>In-process RAM</td><td>Loaded on first request</td><td>read only</td><td><code>gazetteer.py</code></td></tr>
+    <tr><td>geocoding · routing · corridor · planner · geometry · trip</td><td>Internal modules</td><td>Every request</td><td>n/a</td><td><code>fuel/services/</code></td></tr>
+    <tr><td>DRF views, serializers, error handler</td><td>API layer</td><td>Every request</td><td>n/a</td><td><code>fuel/api/</code></td></tr>
+  </tbody>
+</table>
+
+<h2>6. Where errors come from</h2>
+<table>
+  <thead><tr><th>HTTP</th><th>code</th><th>Raised by</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td>400</td><td>invalid_request</td><td>serializer</td><td><code>range_miles=5</code></td></tr>
+    <tr><td>400</td><td>not_found</td><td>geocoding</td><td><code>start=Xyzzy, ZZ</code></td></tr>
+    <tr><td>400</td><td>outside_usa</td><td>geocoding</td><td><code>start=Toronto, ON</code>, <code>start=Paris</code></td></tr>
+    <tr><td>422</td><td>no_route</td><td>routing (OSRM NoRoute)</td><td>Honolulu → Los Angeles</td></tr>
+    <tr><td>422</td><td>unreachable</td><td>planner</td><td><code>range_miles=100</code>, or Anchorage → Seattle (route crosses Canada)</td></tr>
+    <tr><td>502</td><td>upstream</td><td>routing</td><td>OSRM timeout after retry, malformed JSON</td></tr>
+  </tbody>
+</table>
+
+<h2>7. Sample response (trimmed)</h2>
+<pre>{
+  "start":  {"query": "New York, NY", "label": "New York, NY", "lat": 40.7484, "lon": -73.9967},
+  "finish": {"query": "Los Angeles, CA", "label": "Los Angeles, CA", "lat": 34.0522, "lon": -118.2437},
+  "route":  {"distance_miles": 2799.1, "duration_hours": 41.9, "provider": "osrm",
+             "geometry": {"type": "LineString", "coordinates": [[-73.9967, 40.7484], …]},
+             "map_url": "/api/route/map/?start=New+York%2C+NY&amp;finish=Los+Angeles%2C+CA"},
+  "fuel":   {"mpg": 10, "range_miles": 500, "tank_gallons": 50, "initial_fuel_gallons": 50,
+             "total_gallons": 230.0, "total_cost_usd": 717.31, "fuel_at_finish_gallons": 0,
+             "min_stop_savings_usd": 5, "merged_stops": 4, "warnings": [],
+             "stops": [{"order": 1, "mile_marker": 395.2, "detour_miles": 1.3,
+                        "station": {"id": 0, "opis_id": 0, "name": "…", "address": "…", "city": "…", "state": "…"},
+                        "lat": 0, "lon": 0, "price_per_gallon": 2.99, "gallons_bought": 48.1, "cost_usd": 143.8,
+                        "fuel_on_arrival_gallons": 10.5, "fuel_on_departure_gallons": 50.0}, …]},
+  "meta":   {"external_calls": 1, "cached_route": false, "candidate_stations": 312,
+             "geometry_points": 1104, "routing_ms": 1320, "compute_ms": 148}
+}</pre>
+<p class="note">Field names and the headline numbers are real; per-stop values here are illustrative. Run request 1 of the Postman collection for the exact output.</p>
+</main>
+</body>
+</html>
