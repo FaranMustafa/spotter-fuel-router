@@ -9,3 +9,6 @@ __pycache__/
 .cache/
 staticfiles/
 .DS_Store
+
+# IDE
+.idea/
