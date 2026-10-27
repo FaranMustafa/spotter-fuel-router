@@ -223,7 +223,7 @@
   <div class="step"><div class="num">4</div><div class="card b-ext">
     <h3>Get the driving route <code>routing.get_route(start, finish)</code></h3>
     <span class="tag ext">OSRM demo server</span><span class="tag store">Django LocMem cache, 24 h</span>
-    <p>Cache key = <code>route:v1:</code> + coordinates rounded to 4 dp. On a miss: one GET to <code>router.project-osrm.org/route/v1/driving/{lon,lat};{lon,lat}?overview=full&amp;geometries=geojson</code>, 10 s timeout, one retry on timeout/5xx. Parses distance (m → miles), duration (s → hours) and the GeoJSON LineString (about 11,000 points for NYC → LA). Failures → 502 <code>upstream</code>; OSRM "NoRoute" (e.g. Honolulu) → 422 <code>no_route</code>.</p>
+    <p>Cache key = <code>route:v1:</code> + coordinates rounded to 4 dp. On a miss: one GET to <code>router.project-osrm.org/route/v1/driving/{lon,lat};{lon,lat}?overview=full&amp;geometries=geojson</code>, 10 s timeout, one retry on timeout/5xx. Parses distance (m → miles), duration (s → hours) and the GeoJSON LineString (34,651 points for NYC → LA). Failures → 502 <code>upstream</code>; OSRM "NoRoute" (e.g. Honolulu) → 422 <code>no_route</code>.</p>
     <p>Output: <code>Route(distance_miles=2799, duration_hours, coordinates[(lon,lat)], provider="osrm", cached)</code>. This is the only network call in the normal case; the second identical request reads the cache and reports <code>external_calls: 0</code>.</p>
   </div></div>
   <div class="arrow"></div>
@@ -261,7 +261,7 @@
   <div class="step"><div class="num">8</div><div class="card b-svc">
     <h3>Shrink the geometry <code>geometry.simplify(coords, 0.0005°)</code></h3>
     <span class="tag svc">geometry (numpy Douglas-Peucker)</span>
-    <p>Planning always uses the full OSRM line; the response gets the simplified one (default), the full one, or none. 11,000 points → about 1,100; 742 KB → 59 KB. Visually identical at map zoom.</p>
+    <p>Planning always uses the full OSRM line; the response gets the simplified one (default), the full one, or none. NYC → LA: 34,651 points → 2,586; 742 KB → 59 KB. Visually identical at map zoom.</p>
   </div></div>
   <div class="arrow"></div>
   <div class="step"><div class="num">9</div><div class="card b-api">
