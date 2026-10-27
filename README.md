@@ -8,9 +8,9 @@ and finish are resolved locally, the 8,023 stations are pre-geocoded in a commit
 fixture, and the corridor search and planner run in memory with numpy. A Leaflet map
 page draws the route and the numbered stops.
 
-- Spec: [`docs/SPEC.md`](docs/SPEC.md) · Decisions and alternatives:
-  [`docs/DECISIONS.md`](docs/DECISIONS.md) · Demo script:
-  [`docs/LOOM_SCRIPT.md`](docs/LOOM_SCRIPT.md) · File index: [`filemap.md`](filemap.md)
+- Data flow, every service and every function, as one page:
+  [`docs/DATA_FLOW.html`](docs/DATA_FLOW.html) (open it in a browser) · Postman
+  collection: [`docs/postman_collection.json`](docs/postman_collection.json)
 
 ## Quick start
 
@@ -64,8 +64,15 @@ and its cached repeat, a no-stop trip, a 422, a POST, an empty-tank start, a str
 address, a non-US location and the health check) and a collection variable `base` =
 `http://127.0.0.1:8000`. Query values sit in the *Params* tab, so Postman URL-encodes
 the comma and space. Open the `route.map_url` from any response in a browser to see the
-map. The expected results are listed in
-[`docs/LOOM_SCRIPT.md`](docs/LOOM_SCRIPT.md#postman-collection).
+map.
+
+Expected results: (1) NYC → LA: 2,799 mi, 6 stops, $713.37, `external_calls: 1`.
+(2) The same again: `cached_route: true`, `external_calls: 0`. (3) Dallas → Austin:
+194 mi, 0 stops, a warning. (4) `range_miles=100`: 422 `unreachable`, gap from mile
+1,815 to 1,955. (5) Miami → Seattle POST: 3,306 mi, 8 stops, $859.58. (6) Empty tank
+(`initial_fuel_gallons=0`): initial fuel raised to 0.81 gallons with a warning, 8 stops,
+$867.15. (7) Street address → Boston: 437 mi, 0 stops, `external_calls: 2` (Nominatim
+plus OSRM). (8) `start=Paris`: 400 `outside_usa`. (9) Health: `{"status": "ok"}`.
 
 ## API
 
