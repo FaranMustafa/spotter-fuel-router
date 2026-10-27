@@ -106,11 +106,15 @@
   (function () {
     var data = JSON.parse(document.getElementById("route-data").textContent);
     var map = L.map("map");
-    // OpenStreetMap tiles first. Their server returns a 403 "Access blocked" tile to browsers
-    // whose extensions rewrite the User-Agent or strip the Referer, so on the first tile
-    // error swap to Esri's World Street Map tiles (free, no key needed).
+    // OpenStreetMap tiles first. Their server answers browsers it considers to be
+    // breaking the tile usage policy (for example a User-Agent rewritten by an extension)
+    // with an "Access blocked" image, served as a valid PNG with HTTP 200, so neither an
+    // <img> error nor a status code reveals it. Instead, inspect each loaded tile: the
+    // blocked image has a black-and-yellow stripe down its left edge, which no map tile
+    // has. On the first match swap to Esri's World Street Map (free, no key needed).
     var osmTiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
+      crossOrigin: "anonymous",  // lets the canvas read tile pixels (OSM allows CORS)
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
     var usingFallback = false;
@@ -123,13 +127,33 @@
         attribution: 'Tiles &copy; Esri'
       }).addTo(map);
     }
+    function looksBlocked(img) {
+      try {
+        var w = 20, h = img.naturalHeight || 256;
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        var ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        var d = ctx.getImageData(0, 0, w, h).data;
+        var yellow = 0, black = 0, total = d.length / 4;
+        for (var i = 0; i < d.length; i += 4) {
+          if (d[i] > 200 && d[i + 1] > 180 && d[i + 2] < 80) { yellow++; }
+          else if (d[i] < 40 && d[i + 1] < 40 && d[i + 2] < 40) { black++; }
+        }
+        return yellow / total > 0.15 && black / total > 0.15;
+      } catch (err) {
+        return false;  // tainted canvas or decode failure: assume the tile is fine
+      }
+    }
+    var tilesChecked = 0;
+    osmTiles.on("tileload", function (event) {
+      if (usingFallback || tilesChecked >= 4) { return; }
+      tilesChecked++;
+      if (looksBlocked(event.tile)) { useFallbackTiles(); }
+    });
     osmTiles.on("tileerror", useFallbackTiles);
-    // A blocked tile is still a valid PNG, so <img> never errors on it: probe one tile's
-    // status explicitly (OSM sends Access-Control-Allow-Origin: *).
-    fetch("https://tile.openstreetmap.org/4/3/6.png", { mode: "cors" })
-      .then(function (r) { if (!r.ok) { useFallbackTiles(); } })
-      .catch(useFallbackTiles);
     window.__useFallbackTiles = useFallbackTiles;  // manual switch for debugging
+    window.__looksBlocked = looksBlocked;
 
     if (!data) {
       map.setView([39.5, -98.35], 4);  // contiguous USA
