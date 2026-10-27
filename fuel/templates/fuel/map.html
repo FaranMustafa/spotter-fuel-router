@@ -106,10 +106,30 @@
   (function () {
     var data = JSON.parse(document.getElementById("route-data").textContent);
     var map = L.map("map");
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // OpenStreetMap tiles first. Their server returns a 403 "Access blocked" tile to browsers
+    // whose extensions rewrite the User-Agent or strip the Referer, so on the first tile
+    // error swap to Esri's World Street Map tiles (free, no key needed).
+    var osmTiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
+    var usingFallback = false;
+    function useFallbackTiles() {
+      if (usingFallback) { return; }
+      usingFallback = true;
+      map.removeLayer(osmTiles);
+      L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+        maxZoom: 19,
+        attribution: 'Tiles &copy; Esri'
+      }).addTo(map);
+    }
+    osmTiles.on("tileerror", useFallbackTiles);
+    // A blocked tile is still a valid PNG, so <img> never errors on it: probe one tile's
+    // status explicitly (OSM sends Access-Control-Allow-Origin: *).
+    fetch("https://tile.openstreetmap.org/4/3/6.png", { mode: "cors" })
+      .then(function (r) { if (!r.ok) { useFallbackTiles(); } })
+      .catch(useFallbackTiles);
+    window.__useFallbackTiles = useFallbackTiles;  // manual switch for debugging
 
     if (!data) {
       map.setView([39.5, -98.35], 4);  // contiguous USA
