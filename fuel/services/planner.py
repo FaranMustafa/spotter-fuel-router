@@ -48,17 +48,30 @@ on average $0.65 above the exact optimum (worst case seen: $18).
 Merging micro-stops
 -------------------
 The greedy is cost-optimal but often makes tiny top-ups (2 gallons to save cents). With
-``min_stop_savings_usd > 0`` a post-pass merges such a stop B into the stop A recorded
-just before it: A buys B's gallons (less the fuel B's own round-trip detour no longer
-burns) and B is dropped. Fuel on arrival at every point after B is unchanged by such a
-merge (A's extra purchase is exactly what B's purchase and detour used to cover), so the
-only conditions are that A's departure fuel still fits the tank and A still buys > 0.
-The extra cost is ``A.price * (B.gallons - 2 * B.detour / mpg) - B.price * B.gallons``;
-a merge is applied when it is below ``min_stop_savings_usd`` (always when <= 0). Each
-round re-simulates the plan from the purchase list, applies the cheapest admissible
-merge and repeats until none is left, so the result is a fixed point in which no adjacent
-pair is mergeable, and the total cost rises by less than ``min_stop_savings_usd`` per
-removed stop. The first stop is never merged (there is no purchase at the start).
+``min_stop_savings_usd > 0`` a post-pass drops such a stop B and has a neighbouring stop
+buy its gallons instead. In both directions B's round-trip detour is no longer driven, so
+the neighbour buys ``transfer = B.gallons - 2 * B.detour / mpg``:
+
+* Backward, into the stop A recorded just before B: A buys ``A.gallons + transfer``. Fuel
+  on arrival at every point after B is unchanged (A's extra purchase is exactly what B's
+  purchase and detour used to cover), so the only conditions are that A's departure fuel
+  still fits the tank and A still buys > 0. Extra cost:
+  ``A.price * transfer - B.price * B.gallons``. The first stop is never merged backward
+  (there is no purchase at the start).
+* Forward, into the stop C recorded just after B: fuel on arrival at C falls by
+  ``transfer`` and C buys ``C.gallons + transfer``, so C's departure fuel and everything
+  after C are unchanged. Fuel only decreases between stops, so arrival at C is the lowest
+  point of the leg and the conditions are ``C.arrival - transfer >= 0`` and C still buys
+  > 0. Extra cost: ``C.price * transfer - B.price * B.gallons``. The first stop may be
+  merged forward (the start's initial fuel then carries the vehicle to C); the last stop
+  never is (nothing is bought at the finish).
+
+A merge is applied when its extra cost is below ``min_stop_savings_usd`` (always when
+<= 0). Each round re-simulates the plan from the purchase list, applies the cheapest
+admissible merge in either direction (ties: the one removing the stop with fewer gallons,
+then the lower stop index, then backward before forward) and repeats until none is left,
+so the result is a fixed point in which no stop is mergeable into either neighbour, and
+the total cost rises by less than ``min_stop_savings_usd`` per removed stop.
 """
 
 from __future__ import annotations
@@ -76,7 +89,8 @@ class PlannerConfig:
     mpg: float = 10.0
     range_miles: float = 500.0
     initial_fuel_gallons: float | None = None  # None means a full tank
-    # Merge stops that save less than this (USD) into the previous stop; 0 disables.
+    # Merge stops that save less than this (USD) into the previous or the next stop;
+    # 0 disables.
     min_stop_savings_usd: float = 5.0
 
     def __post_init__(self) -> None:
@@ -311,8 +325,8 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
             else f"{merged} stops that each saved less than {threshold} were"
         )
         warnings.append(
-            f"{what} merged into the previous stop "
-            "(set min_stop_savings_usd=0 for the pure cost optimum)"
+            f"{what} merged into a neighbouring stop "
+            "(set min_stop_savings_usd=0 to disable merging)"
         )
 
     return Plan(
@@ -367,7 +381,7 @@ def _merge_micro_stops(
     need_to: Callable[[float, Candidate], float],
     need_to_finish: Callable[[float], float],
 ) -> tuple[list[Stop], int, float]:
-    """Merge stops saving less than ``config.min_stop_savings_usd`` into the previous stop.
+    """Merge stops saving less than ``config.min_stop_savings_usd`` into a neighbour.
 
     Returns the new stops, the number of stops removed and the fuel left at the finish.
     See "Merging micro-stops" in the module docstring for why each merge is feasible.
@@ -389,23 +403,40 @@ def _merge_micro_stops(
     current, fuel_at_finish = stops, 0.0
     merged = 0
     while True:
-        best: tuple[float, int, float] | None = None
-        for k in range(1, len(current)):  # k >= 1: the first stop is never merged
-            a, b = current[k - 1], current[k]
-            # B's round-trip detour is no longer driven, so A needs that much less.
+        # (extra cost, gallons of the removed stop, its index, 0 backward / 1 forward),
+        # compared as a tuple so ties are broken deterministically.
+        best: tuple[float, float, int, int] | None = None
+        for k, b in enumerate(current):
+            # B's round-trip detour is no longer driven, so the neighbour needs that much less.
             transfer = b.gallons_bought - 2.0 * b.detour_miles / config.mpg
-            if a.fuel_on_departure_gallons + transfer > tank + EPSILON:
-                continue  # A's tank cannot hold B's purchase
-            if a.gallons_bought + transfer <= EPSILON:
-                continue  # A would no longer buy anything
-            extra = a.price_per_gallon * transfer - b.price_per_gallon * b.gallons_bought
-            if extra < threshold and (best is None or extra < best[0]):
-                best = (extra, k, transfer)
+            options: list[tuple[float, int]] = []
+            if k >= 1:  # backward into A; the first stop has no previous purchase
+                a = current[k - 1]
+                if (
+                    a.fuel_on_departure_gallons + transfer <= tank + EPSILON
+                    and a.gallons_bought + transfer > EPSILON
+                ):
+                    options.append((a.price_per_gallon * transfer, 0))
+            if k + 1 < len(current):  # forward into C; nothing is bought at the finish
+                c = current[k + 1]
+                if (
+                    c.fuel_on_arrival_gallons - transfer >= -EPSILON
+                    and c.gallons_bought + transfer > EPSILON
+                ):
+                    options.append((c.price_per_gallon * transfer, 1))
+            for neighbour_cost, direction in options:
+                extra = neighbour_cost - b.price_per_gallon * b.gallons_bought
+                key = (extra, b.gallons_bought, k, direction)
+                if extra < threshold and (best is None or key < best):
+                    best = key
         if best is None:
             break
-        _, k, transfer = best
-        a_candidate, a_gallons = purchases[k - 1]
-        purchases[k - 1] = (a_candidate, a_gallons + transfer)
+        _, _, k, direction = best
+        b_candidate, b_gallons = purchases[k]
+        transfer = b_gallons - 2.0 * b_candidate.detour_miles / config.mpg
+        n = k - 1 if direction == 0 else k + 1
+        n_candidate, n_gallons = purchases[n]
+        purchases[n] = (n_candidate, n_gallons + transfer)
         del purchases[k]
         merged += 1
         current, fuel_at_finish = _simulate(

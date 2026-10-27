@@ -31,7 +31,7 @@
             }
           ]
         },
-        "description": "Cross-country route. Expect about 2,799 miles, 13 stops, $717.31 and `meta.external_calls` 1 on a fresh server (the single OSRM call)."
+        "description": "Cross-country route. Expect about 2,799 miles, 6 stops, $713.37 and `meta.external_calls` 1 on a fresh server (the single OSRM call)."
       }
     },
     {
@@ -159,7 +159,7 @@
             ""
           ]
         },
-        "description": "The same endpoint accepts POST with a JSON body. Expect about 3,306 miles, 20 stops, $876.25."
+        "description": "The same endpoint accepts POST with a JSON body. Expect about 3,306 miles, 8 stops, $859.58."
       }
     },
     {

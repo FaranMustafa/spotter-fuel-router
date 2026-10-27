@@ -247,15 +247,15 @@
       <li>Coast on the initial fuel (default full tank, 50 gal) to the cheapest reachable station. If the initial fuel cannot reach any station, raise it to the minimum needed and add a warning.</li>
       <li>At each station: if a cheaper station is within range, buy just enough to reach it. Else if the finish is within a full tank, buy just enough to arrive empty. Else fill up and go to the cheapest station in range. Detours cost 2 × detour miles of fuel.</li>
       <li>No station in range → 422 <code>unreachable</code> with the gap in miles.</li>
-      <li>Post-pass: merge any stop that saves less than <code>min_stop_savings_usd</code> ($5) into the previous one. NYC → LA: 17 stops → 13, cost rises a few dollars.</li>
+      <li>Post-pass: merge any stop that saves less than <code>min_stop_savings_usd</code> ($5) into the previous stop, or into the next one when the previous tank is already full. NYC → LA: 17 stops → 6, and $722.98 → $713.37, because dropped stops also drop their detours.</li>
     </ol>
-    <p>Output: <code>Plan(stops, total_gallons, total_cost_usd=717.31, fuel_at_finish, warnings, merged_stops)</code>.</p>
+    <p>Output: <code>Plan(stops, total_gallons, total_cost_usd=713.37, fuel_at_finish, warnings, merged_stops)</code>.</p>
   </div></div>
   <div class="arrow"></div>
   <div class="step"><div class="num">7</div><div class="card b-store">
     <h3>Hydrate the chosen stations <code>FuelStation.objects.select_related("place").in_bulk(ids)</code></h3>
     <span class="tag store">SQLite</span>
-    <p>One query for the 13 chosen station ids, with name, address, city, state and coordinates. SQLite is touched only here per request.</p>
+    <p>One query for the 6 chosen station ids, with name, address, city, state and coordinates. SQLite is touched only here per request.</p>
   </div></div>
   <div class="arrow"></div>
   <div class="step"><div class="num">8</div><div class="card b-svc">
@@ -314,8 +314,8 @@
              "geometry": {"type": "LineString", "coordinates": [[-73.9967, 40.7484], …]},
              "map_url": "/api/route/map/?start=New+York%2C+NY&amp;finish=Los+Angeles%2C+CA"},
   "fuel":   {"mpg": 10, "range_miles": 500, "tank_gallons": 50, "initial_fuel_gallons": 50,
-             "total_gallons": 230.0, "total_cost_usd": 717.31, "fuel_at_finish_gallons": 0,
-             "min_stop_savings_usd": 5, "merged_stops": 4, "warnings": [],
+             "total_gallons": 233.06, "total_cost_usd": 713.37, "fuel_at_finish_gallons": 0,
+             "min_stop_savings_usd": 5, "merged_stops": 11, "warnings": ["11 stops that each saved less than $5.00 were merged into a neighbouring stop (set min_stop_savings_usd=0 to disable merging)"],
              "stops": [{"order": 1, "mile_marker": 395.2, "detour_miles": 1.3,
                         "station": {"id": 0, "opis_id": 0, "name": "…", "address": "…", "city": "…", "state": "…"},
                         "lat": 0, "lon": 0, "price_per_gallon": 2.99, "gallons_bought": 48.1, "cost_usd": 143.8,

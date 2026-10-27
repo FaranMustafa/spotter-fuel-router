@@ -330,8 +330,8 @@ def test_route_merges_micro_stops_by_default(client, endpoints):
     assert merged["total_gallons"] == pure["total_gallons"]
     assert merged["total_cost_usd"] == pytest.approx(pure["total_cost_usd"] + 0.20, abs=0.011)
     assert merged["warnings"] == [
-        "1 stop that saved less than $5.00 was merged into the previous stop "
-        "(set min_stop_savings_usd=0 for the pure cost optimum)"
+        "1 stop that saved less than $5.00 was merged into a neighbouring stop "
+        "(set min_stop_savings_usd=0 to disable merging)"
     ]
 
 
@@ -346,7 +346,7 @@ def test_map_view_shows_merge_warning_and_simplified_line(client, endpoints):
     assert response.status_code == 200
     html = response.content.decode()
     assert "3 fuel stops" in html
-    assert "1 stop that saved less than $5.00 was merged into the previous stop" in html
+    assert "1 stop that saved less than $5.00 was merged into a neighbouring stop" in html
     payload = response.context["payload"]
     # The map always draws the simplified line, even when the API caller asked for none.
     assert len(payload["route"]["geometry"]["coordinates"]) == 2

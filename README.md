@@ -81,7 +81,7 @@ GET takes query parameters. POST takes the same fields as a JSON body.
 | `initial_fuel_gallons` | float | full tank | 0 to `range_miles / mpg` | fuel in the tank at the start; if it reaches no station, it is raised to the minimum that reaches the nearest one (with a warning) |
 | `mpg` | float | `10` | 1–100 | fuel economy |
 | `range_miles` | float | `500` | 10–2000 | range on a full tank; tank size = `range_miles / mpg` |
-| `min_stop_savings_usd` | float | `5` | 0–1000 | merge stops that save less than this into the previous stop; `0` gives the pure greedy optimum |
+| `min_stop_savings_usd` | float | `5` | 0–1000 | merge stops that save less than this into the previous or the next stop; `0` disables merging |
 | `geometry` | string | `simplified` | `simplified`, `full`, `none` | route line in the response: Douglas–Peucker at 0.0005° (about 50 m), every OSRM vertex, or `null` |
 
 Planning always uses the full OSRM geometry. `geometry` only changes what is sent back.
@@ -227,7 +227,7 @@ and the map page.
  4. planner      planner.py     greedy gas-station algorithm on the candidates
         │
         ▼
- 5. merge        planner.py     fold stops that save < min_stop_savings_usd into the previous one
+ 5. merge        planner.py     fold stops that save < min_stop_savings_usd into a neighbouring stop
         │
         ▼
  6. response     serializers.py rounding, Douglas–Peucker geometry, map_url, meta
@@ -257,9 +257,11 @@ external-call counter. The views only validate, call `plan_trip` and serialize.
    enough to arrive empty. Otherwise fill up and go to the cheapest station in reach. A
    station's round-trip detour (`2 × detour_miles`) is burned on the way to it.
 5. **Merge.** The greedy often tops up two gallons to save a few cents. A post-pass folds
-   such a stop into the previous one when that costs less than `min_stop_savings_usd`
-   ($5 by default) and the previous stop's tank can hold the fuel. The number removed is
-   reported in `fuel.merged_stops` and in a warning.
+   such a stop into the previous stop (if its tank can hold the fuel) or into the next stop
+   (if the vehicle still reaches it) whenever that costs less than `min_stop_savings_usd`
+   ($5 by default). Dropping a stop also drops its detour, so merged plans are usually
+   cheaper than the unmerged greedy. The number removed is reported in
+   `fuel.merged_stops` and in a warning.
 6. **Response.** Values are rounded (miles 0.1, gallons and USD 0.01, price 0.001,
    degrees 5 dp). The geometry is simplified for the response only, and `map_url`
    carries the plan parameters.
@@ -294,9 +296,10 @@ Measured on a laptop against the public OSRM server, from a fresh clone:
 
 | Trip | Miles | Stops | Fuel cost | External calls | Notes |
 |------|-------|-------|-----------|----------------|-------|
-| New York, NY → Los Angeles, CA | 2,799 | 13 (4 merged) | $717.31 | 1 | routing ~1.4 s (OSRM latency), compute ~250 ms |
-| same request again | 2,799 | 13 | $717.31 | 0 | cached route, routing ~2 ms |
-| Miami, FL → Seattle, WA | 3,306 | 20 (2 merged) | $876.25 | 1 | |
+| New York, NY → Los Angeles, CA | 2,799 | 6 (11 merged) | $713.37 | 1 | routing ~1.4 s (OSRM latency), compute ~250 ms |
+| same request again | 2,799 | 6 | $713.37 | 0 | cached route, routing ~2 ms |
+| same, `min_stop_savings_usd=0` | 2,799 | 17 | $722.98 | 0 | unmerged greedy: more stops *and* more detour fuel |
+| Miami, FL → Seattle, WA | 3,306 | 8 (14 merged) | $859.58 | 1 | |
 | Chicago, IL → Denver, CO | 1,003 | 2 | $146.63 | 1 | |
 | Dallas, TX → Austin, TX | 194 | 0 | $0.00 | 1 | warning: reachable on the initial fuel |
 
@@ -366,8 +369,9 @@ Coverage by area:
   nodes, or to use a commercial truck-stop dataset with coordinates.
 - **Greedy + merge is not the exact optimum** once detours and the per-stop merge
   threshold are involved. On random small instances with detours, the greedy averaged
-  about $0.65 above the true optimum. The merge also cannot remove a top-up when the
-  previous stop already left with a full tank. The upgrade is an exact DP over (station,
+  about $0.65 above the true optimum. The merge pass repairs the greedy's blind spot
+  for detours (it drops stops whose detour costs more than their price advantage), but
+  it only looks one neighbour each way. The upgrade is an exact DP over (station,
   discretized fuel) with an explicit per-stop penalty. It is small enough here (a few
   hundred candidates), but it needs care to stay fast in Python.
 - **Nominatim fallback.** It is used only when a start or finish is not in the local
