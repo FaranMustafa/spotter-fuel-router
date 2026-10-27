@@ -15,6 +15,19 @@ Greedy
 ------
 The start behaves like a free station holding ``initial_fuel_gallons``, so the first stop
 is the cheapest station reachable on the initial fuel (zero stops if the finish is).
+
+Initial fuel too low to move
+----------------------------
+Stations sit at city centroids, a mile or more off the route, so each one costs at
+least its round-trip detour to reach. With ``initial_fuel_gallons`` 0 (or any amount
+below that) no station is reachable even though the vehicle is beside one. If the
+initial fuel reaches neither the finish nor any station, it is raised to exactly the
+fuel needed to reach the nearest station, nearest by required fuel
+``(position + 2 * detour) / mpg``, provided that fits in one tank; the first stop then
+arrives empty and a warning says so. ``Plan.initial_fuel_gallons`` reports the raised
+value and the raised fuel is not bought (it is assumed to be in the tank, like any
+initial fuel). If even a full tank cannot reach a station, :class:`UnreachableError`
+is raised as before.
 At each stop with price ``p``, among the stations ahead that are reachable on a full tank:
 
 1. if one is cheaper than ``p``, buy just enough to reach the first such station;
@@ -114,20 +127,44 @@ class Plan:
 
 
 class UnreachableError(Exception):
-    """No station (or the finish) is within range of the current position."""
+    """No station (or the finish) is within range of the current position.
+
+    When the next station lies within a mile of ``from_miles`` (so "no station within
+    500 miles" would read as nonsense) but its detour still puts it out of reach,
+    ``fuel_gallons`` and ``needed_gallons`` are set and the message names the fuel the
+    nearest station needs instead.
+    """
 
     def __init__(
-        self, from_miles: float, to_miles: float, range_miles: float, *, to_finish: bool = False
+        self,
+        from_miles: float,
+        to_miles: float,
+        range_miles: float,
+        *,
+        to_finish: bool = False,
+        fuel_gallons: float | None = None,
+        needed_gallons: float | None = None,
     ):
         self.from_miles = from_miles
         self.to_miles = to_miles
         self.range_miles = range_miles
         self.to_finish = to_finish
-        target = "finish" if to_finish else "next candidate"
-        super().__init__(
-            f"No fuel station within {range_miles:,.0f} miles after mile {from_miles:,.0f} "
-            f"({target} at mile {to_miles:,.0f})"
-        )
+        self.fuel_gallons = fuel_gallons
+        self.needed_gallons = needed_gallons
+        if fuel_gallons is not None and needed_gallons is not None:
+            origin = "the start" if from_miles <= EPSILON else f"mile {from_miles:,.1f}"
+            message = (
+                f"Cannot reach any fuel station from {origin} with {fuel_gallons:,.2f} "
+                f"gallons; the nearest station at mile {to_miles:,.1f} needs "
+                f"{needed_gallons:,.2f} gallons"
+            )
+        else:
+            target = "finish" if to_finish else "next candidate"
+            message = (
+                f"No fuel station within {range_miles:,.0f} miles after mile {from_miles:,.0f} "
+                f"({target} at mile {to_miles:,.0f})"
+            )
+        super().__init__(message)
 
 
 def _gallons(miles: float, mpg: float) -> float:
@@ -148,13 +185,27 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
     def need_to_finish(from_miles: float) -> float:
         return _gallons(route_miles - from_miles, mpg)
 
-    def unreachable(from_miles: float, after_index: int) -> UnreachableError:
-        for c in cands[after_index + 1 :]:
-            if c.position_miles > from_miles + EPSILON:
-                return UnreachableError(
-                    from_miles, c.position_miles, config.range_miles, to_finish=False
-                )
-        return UnreachableError(from_miles, route_miles, config.range_miles, to_finish=True)
+    def unreachable(from_miles: float, after_index: int, fuel_gallons: float) -> UnreachableError:
+        """``fuel_gallons`` is the most fuel the vehicle can leave ``from_miles`` with."""
+        # From the start every candidate is ahead (positions are >= 0); from a station,
+        # only those strictly further along the route.
+        ahead = [
+            c
+            for c in cands[after_index + 1 :]
+            if after_index < 0 or c.position_miles > from_miles + EPSILON
+        ]
+        if not ahead:
+            return UnreachableError(from_miles, route_miles, config.range_miles, to_finish=True)
+        if ahead[0].position_miles <= from_miles + 1.0:
+            nearest = min(ahead, key=lambda c: need_to(from_miles, c))
+            return UnreachableError(
+                from_miles,
+                nearest.position_miles,
+                config.range_miles,
+                fuel_gallons=fuel_gallons,
+                needed_gallons=need_to(from_miles, nearest),
+            )
+        return UnreachableError(from_miles, ahead[0].position_miles, config.range_miles)
 
     # 1. Coast on the initial fuel.
     if need_to_finish(0.0) <= initial + EPSILON:
@@ -167,9 +218,22 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
             fuel_at_finish_gallons=max(0.0, initial - need_to_finish(0.0)),
             warnings=("The finish is reachable on the initial fuel; no fuel stops are needed.",),
         )
+    warnings: list[str] = []
     reachable = [i for i, c in enumerate(cands) if need_to(0.0, c) <= initial + EPSILON]
+    if not reachable and cands:
+        # See "Initial fuel too low to move": raise it to the minimum that reaches a station.
+        nearest = min(range(len(cands)), key=lambda i: (need_to(0.0, cands[i]), i))
+        needed = need_to(0.0, cands[nearest])
+        if needed <= tank + EPSILON:
+            warnings.append(
+                f"Initial fuel raised from {initial:,.2f} to {needed:,.2f} gallons, the minimum "
+                f"needed to reach the first station at mile {cands[nearest].position_miles:,.1f}; "
+                "the vehicle cannot move with less."
+            )
+            initial = min(needed, tank)
+            reachable = [i for i, c in enumerate(cands) if need_to(0.0, c) <= initial + EPSILON]
     if not reachable:
-        raise unreachable(0.0, -1)
+        raise unreachable(0.0, -1, initial)
     # Cheapest; ties go to the nearest (candidates are sorted by position).
     current = min(reachable, key=lambda i: (cands[i].price, i))
     fuel = max(0.0, initial - need_to(0.0, cands[current]))
@@ -196,7 +260,7 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
             target = None
             buy = max(0.0, need_to_finish(pos) - fuel)
         elif not ahead:
-            raise unreachable(pos, current)
+            raise unreachable(pos, current, tank)
         else:
             target = min(ahead, key=lambda j: (cands[j].price, j))
             buy = max(0.0, tank - fuel)
@@ -233,11 +297,12 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
 
     merged = 0
     if config.min_stop_savings_usd > 0 and len(stops) >= 2:
-        stops, merged, merged_finish = _merge_micro_stops(stops, config, need_to, need_to_finish)
+        stops, merged, merged_finish = _merge_micro_stops(
+            stops, config, initial, need_to, need_to_finish
+        )
         if merged:
             fuel_at_finish = merged_finish
 
-    warnings: tuple[str, ...] = ()
     if merged:
         threshold = f"${config.min_stop_savings_usd:,.2f}"
         what = (
@@ -245,9 +310,9 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
             if merged == 1
             else f"{merged} stops that each saved less than {threshold} were"
         )
-        warnings = (
+        warnings.append(
             f"{what} merged into the previous stop "
-            "(set min_stop_savings_usd=0 for the pure cost optimum)",
+            "(set min_stop_savings_usd=0 for the pure cost optimum)"
         )
 
     return Plan(
@@ -257,7 +322,7 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
         route_miles=route_miles,
         initial_fuel_gallons=initial,
         fuel_at_finish_gallons=fuel_at_finish,
-        warnings=warnings,
+        warnings=tuple(warnings),
         merged_stops=merged,
     )
 
@@ -265,13 +330,14 @@ def plan_stops(candidates: Sequence[Candidate], route_miles: float, config: Plan
 def _simulate(
     purchases: Sequence[tuple[Candidate, float]],
     config: PlannerConfig,
+    initial_fuel_gallons: float,
     need_to: Callable[[float, Candidate], float],
     need_to_finish: Callable[[float], float],
 ) -> tuple[list[Stop], float]:
     """Drive from the start buying ``purchases`` in order; return the stops and the fuel
     left at the finish. Fuel needs are computed exactly as in the greedy."""
     tank = config.tank_gallons
-    fuel = config.start_fuel_gallons
+    fuel = initial_fuel_gallons
     previous = 0.0
     stops: list[Stop] = []
     for order, (c, gallons) in enumerate(purchases, start=1):
@@ -297,6 +363,7 @@ def _simulate(
 def _merge_micro_stops(
     stops: list[Stop],
     config: PlannerConfig,
+    initial_fuel_gallons: float,
     need_to: Callable[[float, Candidate], float],
     need_to_finish: Callable[[float], float],
 ) -> tuple[list[Stop], int, float]:
@@ -341,5 +408,7 @@ def _merge_micro_stops(
         purchases[k - 1] = (a_candidate, a_gallons + transfer)
         del purchases[k]
         merged += 1
-        current, fuel_at_finish = _simulate(purchases, config, need_to, need_to_finish)
+        current, fuel_at_finish = _simulate(
+            purchases, config, initial_fuel_gallons, need_to, need_to_finish
+        )
     return current, merged, fuel_at_finish

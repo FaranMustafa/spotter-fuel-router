@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
+from decimal import Decimal
 
 import pytest
 import responses
 from django.urls import reverse
 
+from fuel.models import FuelStation
+from fuel.services import gazetteer
 from tests import test_trip
-from tests.test_trip import HAPPY_STATIONS, OSRM_URL, make_stations, mock_osrm
+from tests.test_trip import HAPPY_STATIONS, OSRM_URL, make_place, make_stations, mock_osrm
 
 # Shared fixtures from test_trip (pytest resolves fixtures by name in this module).
 _isolate = test_trip._isolate
@@ -125,6 +129,42 @@ def test_route_short_trip_has_no_stops_and_a_warning(client, endpoints, happy_st
     assert fuel["total_gallons"] == 0
     assert fuel["fuel_at_finish_gallons"] == pytest.approx(30, abs=0.01)
     assert len(fuel["warnings"]) == 1
+
+
+@pytest.mark.django_db
+@responses.activate
+def test_route_empty_tank_raises_initial_fuel_with_warning(client, endpoints, happy_stations):
+    # A station two miles along the route and ~2 miles off it (like a city centroid):
+    # with 0 gallons nothing is reachable, so the planner raises the initial fuel.
+    place = make_place("Offroute", 2, lat_offset=0.03)
+    FuelStation.objects.create(
+        opis_id=2001,
+        name="Off Route Fuel",
+        address="Main St",
+        city=place.city,
+        state=place.state,
+        rack_id=1,
+        retail_price=Decimal("3.30"),
+        place=place,
+    )
+    gazetteer.reload_station_index()
+    mock_osrm()
+
+    response = client.get(ROUTE_URL, {**TRIP, "initial_fuel_gallons": 0})
+
+    assert response.status_code == 200
+    fuel = response.json()["fuel"]
+    first = fuel["stops"][0]
+    assert first["mile_marker"] == pytest.approx(2, abs=0.1)
+    assert first["detour_miles"] > 1
+    assert first["fuel_on_arrival_gallons"] == 0
+    expected = (2 + 2 * first["detour_miles"]) / 10
+    assert fuel["initial_fuel_gallons"] == pytest.approx(expected, abs=0.02)
+    assert re.fullmatch(
+        r"Initial fuel raised from 0\.00 to \d+\.\d{2} gallons, the minimum needed to reach "
+        r"the first station at mile 2\.0; the vehicle cannot move with less\.",
+        fuel["warnings"][0],
+    )
 
 
 @pytest.mark.django_db

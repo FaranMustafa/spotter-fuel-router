@@ -56,11 +56,16 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
   -d '{"start": "Miami, FL", "finish": "Seattle, WA"}'
 ```
 
-**Postman:** create a `GET` request to `http://127.0.0.1:8000/api/route/` and put
-`start` and `finish` in the *Params* tab (Postman URL-encodes the comma and space). For
-`POST`, choose *Body → raw → JSON* and send the same fields as a JSON object. Open the
-`route.map_url` from any response in a browser to see the map. The requests used in the
-demo are listed in [`docs/LOOM_SCRIPT.md`](docs/LOOM_SCRIPT.md#postman-collection).
+### Postman
+
+Import [`docs/postman_collection.json`](docs/postman_collection.json) (File → Import).
+It is a Postman v2.1 collection, "Spotter fuel route API", with nine requests (NYC → LA
+and its cached repeat, a no-stop trip, a 422, a POST, an empty-tank start, a street
+address, a non-US location and the health check) and a collection variable `base` =
+`http://127.0.0.1:8000`. Query values sit in the *Params* tab, so Postman URL-encodes
+the comma and space. Open the `route.map_url` from any response in a browser to see the
+map. The expected results are listed in
+[`docs/LOOM_SCRIPT.md`](docs/LOOM_SCRIPT.md#postman-collection).
 
 ## API
 
@@ -73,7 +78,7 @@ GET takes query parameters. POST takes the same fields as a JSON body.
 | `start` | string | required | ≤ 200 chars | `"City, ST"`, `"City ST"`, `"City, State Name"`, or `"lat,lon"` |
 | `finish` | string | required | ≤ 200 chars | same formats as `start` |
 | `corridor_miles` | float | `10` | 0.5–100 | max straight-line distance of a station from the route |
-| `initial_fuel_gallons` | float | full tank | 0 to `range_miles / mpg` | fuel in the tank at the start |
+| `initial_fuel_gallons` | float | full tank | 0 to `range_miles / mpg` | fuel in the tank at the start; if it reaches no station, it is raised to the minimum that reaches the nearest one (with a warning) |
 | `mpg` | float | `10` | 1–100 | fuel economy |
 | `range_miles` | float | `500` | 10–2000 | range on a full tank; tank size = `range_miles / mpg` |
 | `min_stop_savings_usd` | float | `5` | 0–1000 | merge stops that save less than this into the previous stop; `0` gives the pure greedy optimum |
@@ -332,7 +337,7 @@ database it does nothing and just re-exports the fixture.
 ## Testing
 
 ```sh
-uv run pytest                                          # 171 tests, ~4 s
+uv run pytest                                          # 175 tests, ~4 s
 uv run ruff check . && uv run ruff format --check .    # lint + strict formatting
 ```
 
@@ -372,7 +377,12 @@ Coverage by area:
   Canadian province code (`"Toronto, ON"`) are rejected as `outside_usa` before any
   call, and a Nominatim best match outside the US is rejected rather than replaced by a
   US place. An ambiguous bare name without a state, such as `"Paris"`, can therefore
-  resolve abroad and be rejected; add a state (`"Paris, TX"`) to disambiguate.
+  resolve abroad and be rejected; add a state (`"Paris, TX"`) to disambiguate. Full
+  street addresses (`"1600 Pennsylvania Ave NW, Washington, DC"`) work through this
+  fallback, at the cost of one extra external call each.
+- **US stations only.** Canadian stations are excluded from the index by design, so a
+  route that leaves the US (for example Anchorage → Seattle, which runs through Canada)
+  returns 422 `unreachable` at the gap.
 - **No auth or rate limiting**, and the cache is per-process `LocMemCache`. Production
   would add API keys or throttling (DRF throttles), Redis for a shared route cache,
   Postgres, and gunicorn.

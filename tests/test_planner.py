@@ -170,16 +170,72 @@ def test_no_station_reachable_from_start() -> None:
     assert (exc.value.from_miles, exc.value.to_miles) == (0, 900)
 
 
-def test_empty_tank_start_needs_station_at_mile_zero() -> None:
+def test_empty_tank_start_uses_station_at_mile_zero_without_adjustment() -> None:
     empty = PlannerConfig(initial_fuel_gallons=0)
     candidates = [cand(0.0, 3.0, 1), cand(250, 4.0, 2)]
     plan = plan_stops(candidates, 300, empty)
     replay(plan, candidates, empty)
+    assert plan.initial_fuel_gallons == 0
     assert [s.station_id for s in plan.stops] == [1]
     assert plan.stops[0].gallons_bought == pytest.approx(30)
+    assert not any("raised" in w for w in plan.warnings)
+
+
+def test_empty_tank_start_raises_initial_fuel_to_reach_nearest_station() -> None:
+    # Stations sit off the route: with 0 gallons none is reachable, so the initial fuel
+    # is raised to exactly what the nearest one (by required fuel) needs.
+    empty = PlannerConfig(initial_fuel_gallons=0)
+    candidates = [cand(1.2, 3.0, 1, detour=1.5), cand(3.0, 2.9, 2, detour=0.4), cand(250, 4.0, 3)]
+    plan = plan_stops(candidates, 300, empty)
+    replay(plan, candidates, empty)
+    # Needs: station 1 (1.2 + 3.0) / 10 = 0.42, station 2 (3.0 + 0.8) / 10 = 0.38.
+    assert plan.initial_fuel_gallons == pytest.approx(0.38)
+    assert plan.warnings[0] == (
+        "Initial fuel raised from 0.00 to 0.38 gallons, the minimum needed to reach the "
+        "first station at mile 3.0; the vehicle cannot move with less."
+    )
+    first = plan.stops[0]
+    assert first.station_id == 2
+    assert first.fuel_on_arrival_gallons == pytest.approx(0)
+    # Every mile driven, detours included, is paid for except the raised initial fuel.
+    trip_gallons = (300 + sum(2 * s.detour_miles for s in plan.stops)) / 10
+    assert plan.total_gallons == pytest.approx(trip_gallons - plan.initial_fuel_gallons)
+    assert plan.total_cost_usd == pytest.approx(
+        sum(s.gallons_bought * s.price_per_gallon for s in plan.stops)
+    )
+    assert plan.fuel_at_finish_gallons == pytest.approx(0)
+
+
+def test_low_initial_fuel_is_raised_with_merging_enabled() -> None:
+    config = PlannerConfig(initial_fuel_gallons=0.1)  # default $5 merge threshold
+    candidates = [cand(1.2, 3.0, 1, detour=1.5), cand(450, 3.5, 2), cand(480, 3.4, 3)]
+    plan = plan_stops(candidates, 900, config)
+    replay(plan, candidates, config)
+    assert plan.initial_fuel_gallons == pytest.approx(0.42)
+    assert plan.warnings[0].startswith("Initial fuel raised from 0.10 to 0.42 gallons")
+    assert plan.stops[0].fuel_on_arrival_gallons == pytest.approx(0)
+
+
+def test_empty_tank_start_without_station_in_one_tank_raises() -> None:
+    empty = PlannerConfig(initial_fuel_gallons=0)
     with pytest.raises(UnreachableError) as exc:
-        plan_stops([cand(5.0, 3.0)], 300, empty)
-    assert (exc.value.from_miles, exc.value.to_miles) == (0, 5)
+        plan_stops([cand(600, 3.0)], 900, empty)
+    assert (exc.value.from_miles, exc.value.to_miles) == (0, 600)
+    assert str(exc.value) == (
+        "No fuel station within 500 miles after mile 0 (next candidate at mile 600)"
+    )
+    # A station next to the start but with a detour longer than half a tank.
+    with pytest.raises(UnreachableError) as exc:
+        plan_stops([cand(0.5, 3.0, 1, detour=260.0)], 900, empty)
+    err = exc.value
+    assert (err.from_miles, err.to_miles) == (0, 0.5)
+    assert err.fuel_gallons == 0
+    assert err.needed_gallons == pytest.approx(52.05)
+    assert str(err) == (
+        "Cannot reach any fuel station from the start with 0.00 gallons; "
+        "the nearest station at mile 0.5 needs 52.05 gallons"
+    )
+    assert "next candidate at mile 0" not in str(err)
 
 
 def test_same_position_duplicates_do_not_loop() -> None:
@@ -440,6 +496,17 @@ def dp_optimal_cost(
     return answer
 
 
+def effective_initial_gallons(
+    candidates: list[Candidate], route_miles: float, config: PlannerConfig
+) -> float:
+    """The initial fuel after the planner's "too low to move" rule (see planner docs)."""
+    start = config.start_fuel_gallons
+    needs = [(c.position_miles + 2 * c.detour_miles) / config.mpg for c in candidates]
+    if route_miles / config.mpg <= start or not needs or min(needs) <= start:
+        return start
+    return min(needs) if min(needs) <= config.tank_gallons else start
+
+
 def test_greedy_matches_brute_force_on_tiny_instances() -> None:
     rng = random.Random(7)
     checked = feasible = 0
@@ -452,8 +519,14 @@ def test_greedy_matches_brute_force_on_tiny_instances() -> None:
         ]
         initial = None if rng.random() < 0.5 else UNIT_GALLONS * rng.randint(0, 100)
         config = PlannerConfig(initial_fuel_gallons=initial, min_stop_savings_usd=0)
-
-        optimum = dp_optimal_cost(candidates, route_miles, config)
+        effective = effective_initial_gallons(candidates, route_miles, config)
+        if effective != config.start_fuel_gallons:
+            initial = effective  # the planner raises it; compare against that optimum
+        optimum = dp_optimal_cost(
+            candidates,
+            route_miles,
+            PlannerConfig(initial_fuel_gallons=initial, min_stop_savings_usd=0),
+        )
         checked += 1
         if math.isinf(optimum):
             with pytest.raises(UnreachableError):
@@ -462,5 +535,6 @@ def test_greedy_matches_brute_force_on_tiny_instances() -> None:
         feasible += 1
         plan = plan_stops(candidates, route_miles, config)
         replay(plan, candidates, config)
+        assert plan.initial_fuel_gallons == pytest.approx(effective)
         assert plan.total_cost_usd <= optimum + 1e-6, (candidates, route_miles, initial)
     assert feasible >= 50  # the generator must exercise the feasible path too

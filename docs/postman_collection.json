@@ -1,0 +1,287 @@
+{
+  "info": {
+    "name": "Spotter fuel route API",
+    "description": "Requests for the spotter-fuel-router demo. Set the collection variable `base` to the server URL (default `http://127.0.0.1:8000`). Query values are entered unencoded in the Params tab; Postman encodes them.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. NYC → LA",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=New York, NY&finish=Los Angeles, CA",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            }
+          ]
+        },
+        "description": "Cross-country route. Expect about 2,799 miles, 13 stops, $717.31 and `meta.external_calls` 1 on a fresh server (the single OSRM call)."
+      }
+    },
+    {
+      "name": "2. NYC → LA again (cached)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=New York, NY&finish=Los Angeles, CA",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            }
+          ]
+        },
+        "description": "Same request as 1. Shows `meta.cached_route` true and `meta.external_calls` 0: routes are cached for 24 hours."
+      }
+    },
+    {
+      "name": "3. Dallas → Austin (no stops)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=Dallas, TX&finish=Austin, TX&geometry=none",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "Dallas, TX"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, TX"
+            },
+            {
+              "key": "geometry",
+              "value": "none"
+            }
+          ]
+        },
+        "description": "About 194 miles, inside one tank: zero stops, zero cost and a warning explaining why."
+      }
+    },
+    {
+      "name": "4. Unreachable (422)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=New York, NY&finish=Los Angeles, CA&range_miles=100",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "range_miles",
+              "value": "100"
+            }
+          ]
+        },
+        "description": "With a 100-mile range the route has a gap with no station in range: 422 `unreachable` with the gap in `error.details`."
+      }
+    },
+    {
+      "name": "5. Miami → Seattle (POST JSON)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"start\": \"Miami, FL\", \"finish\": \"Seattle, WA\", \"geometry\": \"none\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{base}}/api/route/",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ]
+        },
+        "description": "The same endpoint accepts POST with a JSON body. Expect about 3,306 miles, 20 stops, $876.25."
+      }
+    },
+    {
+      "name": "6. Empty tank (initial_fuel_gallons=0)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=New York, NY&finish=Los Angeles, CA&initial_fuel_gallons=0",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "initial_fuel_gallons",
+              "value": "0"
+            }
+          ]
+        },
+        "description": "Stations sit at city centroids, a mile or more off the route, so none is reachable with literally 0 gallons. The planner raises the initial fuel to the minimum needed to reach the first station, reports it in `fuel.initial_fuel_gallons` and explains it in `fuel.warnings`; the first stop (mile 5.5 on this route) arrives empty."
+      }
+    },
+    {
+      "name": "7. Street address (Nominatim fallback)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=1600 Pennsylvania Ave NW, Washington, DC&finish=Boston, MA&geometry=none",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "1600 Pennsylvania Ave NW, Washington, DC"
+            },
+            {
+              "key": "finish",
+              "value": "Boston, MA"
+            },
+            {
+              "key": "geometry",
+              "value": "none"
+            }
+          ]
+        },
+        "description": "A full street address is not in the local gazetteer, so it falls back to Nominatim: `meta.external_calls` is 2 (one Nominatim call plus the OSRM call)."
+      }
+    },
+    {
+      "name": "8. Outside USA (400)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/route/?start=Paris&finish=Austin, TX",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            ""
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "Paris"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, TX"
+            }
+          ]
+        },
+        "description": "A bare \"Paris\" resolves to Paris, France through Nominatim and is rejected: 400 `outside_usa`. Add a state (\"Paris, TX\") to disambiguate."
+      }
+    },
+    {
+      "name": "9. Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base}}/api/health/",
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "api",
+            "health",
+            ""
+          ]
+        },
+        "description": "Liveness check: `GET /api/health/`."
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    }
+  ]
+}
